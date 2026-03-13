@@ -1,0 +1,19 @@
+# PolyBMiCoB - Polymarket BTC Micro-Cycle Options Bot
+# Direct dependencies only. Install with: pip install -r requirements.txt
+
+# Polymarket CLOB trading client
+py-clob-client>=0.34.0
+
+# HTTP client (sync + async, with SOCKS proxy support)
+httpx[socks]>=0.28.0
+
+# Ethereum/Polygon blockchain interaction
+web3>=7.0.0
+eth-account>=0.13.0
+
+# Polymarket Builder Relayer (gasless transactions - claiming, approvals, etc.)
+# Must install from GitHub - PyPI version lacks PROXY wallet support
+py-builder-relayer-client @ git+https://github.com/Polymarket/py-builder-relayer-client.git
+py-builder-signing-sdk>=0.0.2
+
+python-dotenv>=1.0.0

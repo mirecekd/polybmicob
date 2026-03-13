@@ -1,0 +1,19 @@
+# PolyBMiCoB - single container: bot + dashboard
+#
+# Dry-run (default):  docker compose up
+# Live trading:       docker compose up -e BOT_MODE=live
+# Rebuild:            docker compose up --build
+
+services:
+  polybmicob:
+    build: .
+    container_name: polybmicob
+    env_file: .env
+    environment:
+      - BOT_MODE=${BOT_MODE:-dry-run}
+      - DASHBOARD_PORT=8005
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

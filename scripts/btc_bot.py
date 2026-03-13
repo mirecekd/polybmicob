@@ -1,0 +1,596 @@
+#!/usr/bin/env python3
+"""
+PolyBMiCoB - Polymarket BTC Micro-Cycle Options Bot
+
+Main bot loop:
+  1. Scan Gamma API for upcoming BTC 5-minute Up/Down markets
+  2. Get BTC price momentum from Binance
+  3. For each market: analyze orderbook + generate signal
+  4. If signal has sufficient edge: place GTC limit order
+  5. Log everything, sleep, repeat
+
+Uses ClobClient directly (NOT ClobClientWrapper which has signature_type bug).
+Hold-to-resolution strategy: no stop-loss/take-profit for 5-min markets.
+
+Usage:
+  cd /path/to/polybmicob
+  workon polybmicob
+  python scripts/btc_bot.py [--dry-run]
+"""
+
+import json
+import logging
+import os
+import signal
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from dotenv import load_dotenv
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY
+
+from lib.btc_market_scanner import scan_btc_5m_markets
+from lib.price_feed import get_btc_momentum, get_fear_greed_index
+from lib.claim_winnings import claim_all_winnings
+from lib.resolution_tracker import resolve_trades
+from lib.signal_engine import (
+    OrderbookSignal,
+    TradeSignal,
+    compute_orderbook_imbalance,
+    generate_signal,
+)
+
+# Load .env from project root
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+# ──────────────────────────────────────────────────────────────
+# Configuration (all from .env)
+# ──────────────────────────────────────────────────────────────
+
+PRIVATE_KEY = os.environ.get("POLYBMICOB_PRIVATE_KEY", "")
+FUNDER = os.environ.get("POLYMARKET_PROXY_WALLET", "")
+SIGNATURE_TYPE = int(os.environ.get("SIGNATURE_TYPE", "1"))
+CHAIN_ID = int(os.environ.get("CHAIN_ID", "137"))
+CLOB_HOST = os.environ.get("CLOB_HOST", "https://clob.polymarket.com")
+
+# Trading parameters
+MAX_TRADE_USD = float(os.environ.get("MAX_TRADE_USD", "1.00"))
+MIN_BALANCE_USD = float(os.environ.get("MIN_BALANCE_USD", "3.00"))
+MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "3"))
+MIN_EDGE = float(os.environ.get("MIN_EDGE", "0.10"))
+MAX_DAILY_LOSS_USD = float(os.environ.get("MAX_DAILY_LOSS_USD", "3.00"))
+MAX_CONSECUTIVE_LOSSES = int(os.environ.get("MAX_CONSECUTIVE_LOSSES", "5"))
+PAUSE_AFTER_LOSSES_SEC = int(os.environ.get("PAUSE_AFTER_LOSSES_SEC", "1800"))
+
+# Timing
+SCAN_INTERVAL_SEC = int(os.environ.get("SCAN_INTERVAL_SEC", "45"))
+SCAN_MIN_MINUTES = float(os.environ.get("SCAN_MIN_MINUTES", "1.0"))
+SCAN_MAX_MINUTES = float(os.environ.get("SCAN_MAX_MINUTES", "6.0"))
+RATE_LIMIT_SEC = float(os.environ.get("RATE_LIMIT_SEC", "1.5"))
+RPC_URL = os.environ.get("CHAINSTACK_NODE", "https://polygon-bor-rpc.publicnode.com")
+
+# Auto-claim: check for redeemable positions every N cycles (~7.5 min at 45s interval)
+CLAIM_EVERY_N_CYCLES = int(os.environ.get("CLAIM_EVERY_N_CYCLES", "10"))
+
+# Builder API credentials (for gasless claiming via relayer)
+BUILDER_KEY = os.environ.get("POLY_BUILDER_API_KEY", "")
+BUILDER_SECRET = os.environ.get("POLY_BUILDER_SECRET", "")
+BUILDER_PASSPHRASE = os.environ.get("POLY_BUILDER_PASSPHRASE", "")
+
+# Paths
+DATA_DIR = Path(__file__).parent.parent / "data"
+TRADES_FILE = DATA_DIR / "btc_trades.json"
+LOG_FILE = DATA_DIR / "btc_bot.log"
+
+# ──────────────────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────────────────
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger("polybmicob")
+
+# ──────────────────────────────────────────────────────────────
+# State
+# ──────────────────────────────────────────────────────────────
+
+traded_slugs: set[str] = set()
+daily_loss_usd: float = 0.0
+consecutive_losses: int = 0
+paused_until: float = 0.0
+shutdown_requested: bool = False
+
+
+def restore_state_from_trades() -> None:
+    """
+    Restore traded_slugs from trade history on startup.
+    This prevents double-trading markets after a restart.
+    Also restores daily loss tracking from today's trades.
+    """
+    global traded_slugs
+    trades = load_trades()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for t in trades:
+        slug = t.get("slug", "")
+        if slug:
+            traded_slugs.add(slug)
+    today_trades = [t for t in trades if t.get("timestamp", "").startswith(today)]
+    log.info(
+        "Restored state: %d traded slugs, %d trades today",
+        len(traded_slugs),
+        len(today_trades),
+    )
+
+
+def handle_shutdown(signum, frame):
+    """Handle graceful shutdown on SIGINT/SIGTERM."""
+    global shutdown_requested
+    log.info("Shutdown requested (signal %d), finishing current cycle...", signum)
+    shutdown_requested = True
+
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
+
+# ──────────────────────────────────────────────────────────────
+# CLOB Client
+# ──────────────────────────────────────────────────────────────
+
+_clob_client: ClobClient | None = None
+
+
+def get_clob_client() -> ClobClient:
+    """Get or create the CLOB client (lazy init)."""
+    global _clob_client
+    if _clob_client is not None:
+        return _clob_client
+
+    if not PRIVATE_KEY:
+        raise RuntimeError(
+            "POLYBMICOB_PRIVATE_KEY not set. "
+            "Check .env file in polyclaw or polybmicob directory."
+        )
+
+    log.info("Initializing CLOB client (signature_type=%d)...", SIGNATURE_TYPE)
+    client = ClobClient(
+        CLOB_HOST,
+        key=PRIVATE_KEY,
+        chain_id=CHAIN_ID,
+        signature_type=SIGNATURE_TYPE,
+        funder=FUNDER,
+    )
+    creds = client.create_or_derive_api_creds()
+    client.set_api_creds(creds)
+    log.info("CLOB client ready.")
+    _clob_client = client
+    return client
+
+
+# ──────────────────────────────────────────────────────────────
+# Trade logging
+# ──────────────────────────────────────────────────────────────
+
+
+def load_trades() -> list[dict]:
+    """Load trade history from JSON file."""
+    if not TRADES_FILE.exists():
+        return []
+    try:
+        return json.loads(TRADES_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_trade(trade: dict) -> None:
+    """Append a trade to the JSON trade log (atomic write)."""
+    trades = load_trades()
+    trades.append(trade)
+    tmp = TRADES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(trades, indent=2))
+    tmp.rename(TRADES_FILE)
+
+
+# ──────────────────────────────────────────────────────────────
+# Orderbook analysis
+# ──────────────────────────────────────────────────────────────
+
+
+def get_orderbook_signal(
+    client: ClobClient,
+    up_token_id: str,
+    down_token_id: str,
+) -> OrderbookSignal | None:
+    """Fetch orderbooks for both tokens and compute imbalance signal."""
+    try:
+        up_book = client.get_order_book(up_token_id)
+        time.sleep(RATE_LIMIT_SEC)
+        down_book = client.get_order_book(down_token_id)
+
+        up_bids = [
+            (float(b.price), float(b.size)) for b in (up_book.bids or [])
+        ]
+        up_asks = [
+            (float(a.price), float(a.size)) for a in (up_book.asks or [])
+        ]
+        down_bids = [
+            (float(b.price), float(b.size)) for b in (down_book.bids or [])
+        ]
+        down_asks = [
+            (float(a.price), float(a.size)) for a in (down_book.asks or [])
+        ]
+
+        return compute_orderbook_imbalance(up_bids, up_asks, down_bids, down_asks)
+
+    except Exception as exc:
+        log.warning("Failed to get orderbook: %s", exc)
+        return None
+
+
+# ──────────────────────────────────────────────────────────────
+# Order execution
+# ──────────────────────────────────────────────────────────────
+
+
+def place_trade(
+    client: ClobClient,
+    signal: TradeSignal,
+    size_usd: float,
+    dry_run: bool = False,
+) -> dict | None:
+    """
+    Place a GTC buy order for the given signal.
+
+    Uses orderbook-aware pricing: market_price + $0.02, capped at best ask.
+    Ensures minimum order value of $1.01.
+
+    Returns:
+        Order result dict, or None on failure.
+    """
+    token_id = signal.token_id
+    price = signal.entry_price
+
+    try:
+        book = client.get_order_book(token_id)
+        asks = (
+            sorted(book.asks, key=lambda a: float(a.price))
+            if book.asks
+            else []
+        )
+
+        if asks:
+            best_ask = float(asks[0].price)
+            exec_price = round(min(price + 0.02, best_ask, 0.95), 2)
+        else:
+            exec_price = round(min(price + 0.02, 0.95), 2)
+
+        exec_price = max(exec_price, 0.02)
+
+        # Calculate shares (minimum order value $1.01)
+        size = round(size_usd / exec_price, 0)
+        while size * exec_price < 1.01:
+            size += 1
+
+        log.info(
+            "  Placing %s %s: %.0f shares @ $%.2f ($%.2f total)",
+            "DRY-RUN" if dry_run else "ORDER",
+            signal.direction.upper(),
+            size,
+            exec_price,
+            size * exec_price,
+        )
+
+        if dry_run:
+            return {
+                "orderID": "dry-run",
+                "status": "dry-run",
+                "exec_price": exec_price,
+                "size": size,
+            }
+
+        order_args = OrderArgs(
+            price=exec_price, size=size, side=BUY, token_id=token_id
+        )
+        signed = client.create_order(order_args)
+        result = client.post_order(signed, OrderType.GTC)
+
+        order_id = result.get("orderID", result.get("id", "unknown"))
+        log.info("  ORDER PLACED: %s", order_id)
+
+        return result
+
+    except Exception as exc:
+        log.error("  Trade failed: %s", exc)
+        return None
+
+
+# ──────────────────────────────────────────────────────────────
+# Main loop
+# ──────────────────────────────────────────────────────────────
+
+
+def run_cycle(dry_run: bool = False) -> None:
+    """Run one scan-signal-trade cycle."""
+    global daily_loss_usd, consecutive_losses, paused_until
+
+    now = time.time()
+
+    # Check if paused after consecutive losses
+    if now < paused_until:
+        remaining = int(paused_until - now)
+        log.info(
+            "Paused for %d more seconds after %d consecutive losses",
+            remaining,
+            MAX_CONSECUTIVE_LOSSES,
+        )
+        return
+
+    # ── 1. Scan for upcoming markets ─────────────────────────
+    try:
+        markets = scan_btc_5m_markets(SCAN_MIN_MINUTES, SCAN_MAX_MINUTES)
+        log.info("Found %d upcoming BTC 5m markets", len(markets))
+    except Exception as exc:
+        log.error("Scanner failed: %s", exc)
+        return
+
+    if not markets:
+        return
+
+    # ── 2. Get BTC momentum ──────────────────────────────────
+    try:
+        snapshot = get_btc_momentum()
+        log.info(
+            "BTC $%.0f  momentum=%+.4f%%  trend=%s",
+            snapshot.price,
+            snapshot.momentum_5m,
+            snapshot.trend,
+        )
+    except Exception as exc:
+        log.error("Price feed failed: %s", exc)
+        return
+
+    # ── 3. Get sentiment (non-critical) ──────────────────────
+    fg = get_fear_greed_index()
+    fg_value = fg.value if fg else None
+
+    # ── 4. Check each market for signals ─────────────────────
+    client = None  # lazy init
+
+    for mkt in markets:
+        if shutdown_requested:
+            return
+
+        if mkt.slug in traded_slugs:
+            continue
+
+        # Quality filters
+        if mkt.liquidity < 500:
+            log.info("  %s: skip (liquidity $%.0f < $500)", mkt.slug, mkt.liquidity)
+            continue
+
+        if mkt.up_price is not None and not (0.10 <= mkt.up_price <= 0.90):
+            log.info("  %s: skip (Up price %.2f outside 0.10-0.90)", mkt.slug, mkt.up_price)
+            continue
+
+        # Get CLOB client (lazy init)
+        if client is None:
+            try:
+                client = get_clob_client()
+            except Exception as exc:
+                log.error("CLOB client init failed: %s", exc)
+                return
+
+        # Get orderbook imbalance
+        ob_signal = get_orderbook_signal(
+            client, mkt.up_token_id, mkt.down_token_id
+        )
+
+        # Generate signal
+        sig = generate_signal(
+            momentum_pct=snapshot.momentum_5m,
+            trend=snapshot.trend,
+            up_price=mkt.up_price,
+            down_price=mkt.down_price,
+            up_token_id=mkt.up_token_id,
+            down_token_id=mkt.down_token_id,
+            market_slug=mkt.slug,
+            orderbook=ob_signal,
+            fear_greed_value=fg_value,
+            min_edge=MIN_EDGE,
+        )
+
+        # Also generate a "what-if" signal at 0% edge for dry-run visibility
+        if sig is None and dry_run:
+            whatif = generate_signal(
+                momentum_pct=snapshot.momentum_5m,
+                trend=snapshot.trend,
+                up_price=mkt.up_price,
+                down_price=mkt.down_price,
+                up_token_id=mkt.up_token_id,
+                down_token_id=mkt.down_token_id,
+                market_slug=mkt.slug,
+                orderbook=ob_signal,
+                fear_greed_value=fg_value,
+                min_edge=0.0,  # show what we'd do at any edge
+            )
+            if whatif:
+                potential_profit = (1.00 - whatif.entry_price) * MAX_TRADE_USD / whatif.entry_price
+                potential_loss = MAX_TRADE_USD
+                log.info(
+                    "  %s: SKIP (edge %.1f%% < %.0f%% threshold)  "
+                    "Would buy %s @ $%.2f -> win $%.2f / lose $%.2f  [%s]",
+                    mkt.slug,
+                    whatif.edge * 100,
+                    MIN_EDGE * 100,
+                    whatif.direction.upper(),
+                    whatif.entry_price,
+                    potential_profit,
+                    potential_loss,
+                    whatif.reason,
+                )
+            else:
+                log.info(
+                    "  %s: no edge (Up=%.2f, Down=%.2f, trend=%s%s)",
+                    mkt.slug,
+                    mkt.up_price or 0,
+                    mkt.down_price or 0,
+                    snapshot.trend,
+                    f", ob={ob_signal.imbalance:+.2f}" if ob_signal else "",
+                )
+            continue
+
+        if sig is None:
+            log.info(
+                "  %s: no signal (Up=%.2f, Down=%.2f%s)",
+                mkt.slug,
+                mkt.up_price or 0,
+                mkt.down_price or 0,
+                f", ob={ob_signal.imbalance:+.2f}" if ob_signal else "",
+            )
+            continue
+
+        # Calculate expected profit for logging
+        shares = MAX_TRADE_USD / sig.entry_price
+        profit_if_win = (1.00 - sig.entry_price) * shares
+        loss_if_lose = MAX_TRADE_USD
+
+        log.info(
+            "  SIGNAL: %s on %s  edge=%.1f%%  conf=%.0f%%",
+            sig.direction.upper(),
+            mkt.slug,
+            sig.edge * 100,
+            sig.confidence * 100,
+        )
+        log.info(
+            "    Buy %s @ $%.2f (%.0f shares) -> WIN $%.2f / LOSE $%.2f  (EV: $%+.2f)",
+            sig.direction.upper(),
+            sig.entry_price,
+            shares,
+            profit_if_win,
+            loss_if_lose,
+            sig.confidence * profit_if_win - (1 - sig.confidence) * loss_if_lose,
+        )
+        log.info("    Reason: %s", sig.reason)
+
+        # ── 5. Execute trade ─────────────────────────────────
+        # Check daily loss limit
+        if daily_loss_usd >= MAX_DAILY_LOSS_USD:
+            log.warning(
+                "Daily loss limit reached ($%.2f >= $%.2f). Stopping.",
+                daily_loss_usd,
+                MAX_DAILY_LOSS_USD,
+            )
+            return
+
+        result = place_trade(client, sig, MAX_TRADE_USD, dry_run=dry_run)
+
+        if result is not None:
+            order_id = result.get("orderID", result.get("id", "unknown"))
+            traded_slugs.add(mkt.slug)
+
+            # Log trade
+            trade_record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "slug": mkt.slug,
+                "direction": sig.direction,
+                "token_id": sig.token_id,
+                "entry_price": sig.entry_price,
+                "edge": round(sig.edge, 4),
+                "confidence": round(sig.confidence, 4),
+                "reason": sig.reason,
+                "order_id": order_id,
+                "dry_run": dry_run,
+                "btc_price": snapshot.price,
+                "momentum": round(snapshot.momentum_5m, 4),
+                "fear_greed": fg_value,
+            }
+            save_trade(trade_record)
+
+            time.sleep(RATE_LIMIT_SEC)
+
+
+def main() -> None:
+    """Main entry point."""
+    # Dry-run if: --dry-run flag OR BOT_MODE != "live" in .env
+    bot_mode = os.environ.get("BOT_MODE", "dry-run").strip().lower()
+    dry_run = "--dry-run" in sys.argv or bot_mode != "live"
+
+    log.info("=" * 60)
+    log.info("PolyBMiCoB - BTC Micro-Cycle Options Bot")
+    log.info("Mode: %s", "DRY RUN" if dry_run else "LIVE")
+    log.info(
+        "Config: max_trade=$%.2f, min_edge=%.0f%%, scan=%d-%dm, interval=%ds",
+        MAX_TRADE_USD,
+        MIN_EDGE * 100,
+        SCAN_MIN_MINUTES,
+        SCAN_MAX_MINUTES,
+        SCAN_INTERVAL_SEC,
+    )
+    log.info("=" * 60)
+
+    # Restore state from previous runs (prevents double-trading after restart)
+    restore_state_from_trades()
+
+    cycle_count = 0
+
+    while not shutdown_requested:
+        cycle_count += 1
+
+        try:
+            run_cycle(dry_run=dry_run)
+        except Exception as exc:
+            log.error("Cycle error: %s", exc, exc_info=True)
+
+        # ── Resolution check (every 5 cycles) ────────────────
+        if cycle_count % 5 == 0:
+            try:
+                newly = resolve_trades(TRADES_FILE, rate_limit_sec=RATE_LIMIT_SEC)
+                if newly > 0:
+                    log.info("--- Resolved %d trade(s) ---", newly)
+            except Exception as exc:
+                log.debug("Resolution check failed: %s", exc)
+
+        # ── Auto-claim check (every N cycles) ────────────────
+        if cycle_count % CLAIM_EVERY_N_CYCLES == 0 and FUNDER:
+            try:
+                log.info("--- Auto-claim check (cycle %d) ---", cycle_count)
+                claim_all_winnings(
+                    proxy_wallet=FUNDER,
+                    private_key=PRIVATE_KEY,
+                    builder_key=BUILDER_KEY,
+                    builder_secret=BUILDER_SECRET,
+                    builder_passphrase=BUILDER_PASSPHRASE,
+                    dry_run=dry_run,
+                )
+            except Exception as exc:
+                log.warning("Auto-claim failed (non-fatal): %s", exc)
+
+        if shutdown_requested:
+            break
+
+        log.info("--- Sleeping %ds ---", SCAN_INTERVAL_SEC)
+        # Sleep in small increments to respond to shutdown quickly
+        for _ in range(SCAN_INTERVAL_SEC):
+            if shutdown_requested:
+                break
+            time.sleep(1)
+
+    log.info("Bot stopped.")
+
+
+if __name__ == "__main__":
+    main()
