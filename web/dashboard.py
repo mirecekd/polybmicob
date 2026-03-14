@@ -336,6 +336,37 @@ def render_html() -> str:
   </div>
 </div>
 
+<div class="stats-row">
+  <div class="stat">
+    <div class="val">{activity['total_cycles']}</div>
+    <div class="lbl">Cycles Today</div>
+  </div>
+  <div class="stat">
+    <div class="val" style="color:{'#f85149' if activity['momentum_skips'] > activity['total_cycles'] * 0.5 else '#8b949e'}">{activity['momentum_skips']}</div>
+    <div class="lbl">Mom. Skips</div>
+  </div>
+  <div class="stat">
+    <div class="val" style="color:#58a6ff">{activity['pre_signals']}</div>
+    <div class="lbl">Pre Signals</div>
+  </div>
+  <div class="stat">
+    <div class="val" style="color:#d29922">{activity['inplay_signals']}</div>
+    <div class="lbl">In-Play Signals</div>
+  </div>
+  <div class="stat">
+    <div class="val" style="color:#3fb950">{activity['orders_placed']}</div>
+    <div class="lbl">Orders</div>
+  </div>
+  <div class="stat">
+    <div class="val" style="color:{'#f85149' if activity['orders_failed'] > 0 else '#8b949e'}">{activity['orders_failed']}</div>
+    <div class="lbl">Failed</div>
+  </div>
+  <div class="stat">
+    <div class="val">{activity['trades_resolved']}</div>
+    <div class="lbl">Resolved</div>
+  </div>
+</div>
+
 {'<div class="empty">No trades yet. Start the bot to see data.</div>' if not trades else f"""
 <details>
   <summary>Recent Trades ({min(len(trades), 50)} of {len(trades)})</summary>
@@ -353,42 +384,8 @@ def render_html() -> str:
 """}
 
 <details>
-  <summary>Today's Activity ({activity['today']})</summary>
+  <summary>Hourly Breakdown ({activity['today']})</summary>
   <div class="expand-content" style="padding:16px;">
-    <div class="stats-row" style="margin-bottom:16px;">
-      <div class="stat">
-        <div class="val">{activity['total_cycles']}</div>
-        <div class="lbl">Cycles</div>
-      </div>
-      <div class="stat">
-        <div class="val" style="color:{'#f85149' if activity['momentum_skips'] > activity['total_cycles'] * 0.5 else '#8b949e'}">{activity['momentum_skips']}</div>
-        <div class="lbl">Momentum Skips</div>
-      </div>
-      <div class="stat">
-        <div class="val">{activity['no_signal']}</div>
-        <div class="lbl">No Signal</div>
-      </div>
-      <div class="stat">
-        <div class="val" style="color:#58a6ff">{activity['pre_signals']}</div>
-        <div class="lbl">Pre-Market Signals</div>
-      </div>
-      <div class="stat">
-        <div class="val" style="color:#d29922">{activity['inplay_signals']}</div>
-        <div class="lbl">In-Play Signals</div>
-      </div>
-      <div class="stat">
-        <div class="val" style="color:#3fb950">{activity['orders_placed']}</div>
-        <div class="lbl">Orders Placed</div>
-      </div>
-      <div class="stat">
-        <div class="val" style="color:{'#f85149' if activity['orders_failed'] > 0 else '#8b949e'}">{activity['orders_failed']}</div>
-        <div class="lbl">Orders Failed</div>
-      </div>
-      <div class="stat">
-        <div class="val">{activity['trades_resolved']}</div>
-        <div class="lbl">Resolved</div>
-      </div>
-    </div>
     <div style="font-size:12px; color:#8b949e; margin-bottom:8px;">
       Last signal: <span style="color:#c9d1d9">{activity['last_signal_time'] or 'none'}</span>
       &nbsp;&nbsp;|&nbsp;&nbsp;
