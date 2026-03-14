@@ -25,7 +25,9 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib imporath
+from pathlib import Path
+
+import httpx
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -93,8 +95,8 @@ TRADING_HOURS: set[int] | None = (
 # Minimum momentum to generate a pre-market signal (%)
 MIN_MOMENTUM_PCT = float(os.environ.get("MIN_MOMENTUM_PCT", "0.05"))
 
-# Minimum order size in shares (Polymarket enforces a minimum, may vary)
-MIN_ORDER_SIZE = int(os.environ.get("MIN_ORDER_SIZE", "5"))
+# Fallback minimum order size (used if API doesn't return min_order_size)
+MIN_ORDER_SIZE_FALLBACK = int(os.environ.get("MIN_ORDER_SIZE", "5"))
 
 # In-play mode: bet on markets already running (60-180s after start)
 IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
@@ -289,25 +291,33 @@ def place_trade(
     price = signal.entry_price
 
     try:
-        book = client.get_order_book(token_id)
-        asks = (
-            sorted(book.asks, key=lambda a: float(a.price))
-            if book.asks
-            else []
+        # Fetch raw orderbook via httpx to get min_order_size + asks
+        raw_resp = httpx.get(
+            f"{CLOB_HOST}/book",
+            params={"token_id": token_id},
+            timeout=15,
         )
+        raw_resp.raise_for_status()
+        raw_book = raw_resp.json()
+
+        # Read dynamic min_order_size from API (fallback to env config)
+        min_order_size = int(raw_book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+
+        asks = sorted(raw_book.get("asks", []), key=lambda a: float(a["price"]))
 
         if asks:
-            best_ask = float(asks[0].price)
+            best_ask = float(asks[0]["price"])
             exec_price = round(min(price + 0.02, best_ask, 0.95), 2)
         else:
             exec_price = round(min(price + 0.02, 0.95), 2)
 
         exec_price = max(exec_price, 0.02)
 
-        # Calculate shares (enforce Polymarket minimum order size)
+        # Calculate shares (enforce per-market minimum from API)
         size = round(size_usd / exec_price, 0)
-        if size < MIN_ORDER_SIZE:
-            size = MIN_ORDER_SIZE
+        if size < min_order_size:
+            size = min_order_size
+
         log.info(
             "  Placing %s %s: %.0f shares @ $%.2f ($%.2f total)",
             "DRY-RUN" if dry_run else "ORDER",
