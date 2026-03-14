@@ -117,6 +117,13 @@ def render_html() -> str:
         mom = t.get("momentum", 0)
         dry = " (dry)" if t.get("dry_run") else ""
 
+        # Trade mode
+        mode = t.get("mode", "pre-market")
+        if mode == "in-play":
+            mode_text = '<span class="mode-ip">IN-PLAY</span>'
+        else:
+            mode_text = '<span class="mode-pre">PRE</span>'
+
         if t.get("resolved") is not None:
             won = t.get("won", False)
             pnl = t.get("pnl", 0)
@@ -128,6 +135,7 @@ def render_html() -> str:
 
         rows += f"""<tr>
           <td class="muted">{ts}</td>
+          <td>{mode_text}</td>
           <td>{short_slug}</td>
           <td class="{dir_class}">{direction}{dry}</td>
           <td>${price:.2f}</td>
@@ -192,6 +200,8 @@ def render_html() -> str:
   .up {{ color:#3fb950; font-weight:bold; }}
   .down {{ color:#f85149; font-weight:bold; }}
   .muted {{ color:#8b949e; font-size:11px; }}
+  .mode-pre {{ color:#58a6ff; font-size:10px; font-weight:600; }}
+  .mode-ip {{ color:#d29922; font-size:10px; font-weight:600; }}
 
   /* Log */
   pre {{ font-size:11px; color:#8b949e; overflow-x:auto; white-space:pre-wrap;
@@ -249,7 +259,7 @@ def render_html() -> str:
   <div class="expand-content">
     <table>
     <thead>
-      <tr><th>Time</th><th>Market</th><th>Dir</th><th>Price</th><th>Edge</th><th>Result</th><th>P&L</th><th>BTC</th><th>Mom</th></tr>
+      <tr><th>Time</th><th>Mode</th><th>Market</th><th>Dir</th><th>Price</th><th>Edge</th><th>Result</th><th>P&L</th><th>BTC</th><th>Mom</th></tr>
     </thead>
     <tbody>
     {rows}
