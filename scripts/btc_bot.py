@@ -79,6 +79,12 @@ RPC_URL = os.environ.get("CHAINSTACK_NODE", "https://polygon-bor-rpc.publicnode.
 # Auto-claim: check for redeemable positions every N cycles (~7.5 min at 45s interval)
 CLAIM_EVERY_N_CYCLES = int(os.environ.get("CLAIM_EVERY_N_CYCLES", "10"))
 
+# In-play mode: bet on markets already running (60-180s after start)
+IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
+IN_PLAY_MIN_ELAPSED = int(os.environ.get("IN_PLAY_MIN_ELAPSED_SEC", "60"))
+IN_PLAY_MAX_ELAPSED = int(os.environ.get("IN_PLAY_MAX_ELAPSED_SEC", "180"))
+IN_PLAY_MIN_MOVE = float(os.environ.get("IN_PLAY_MIN_MOVE_PCT", "0.08"))
+
 # Builder API credentials (for gasless claiming via relayer)
 BUILDER_KEY = os.environ.get("POLY_BUILDER_API_KEY", "")
 BUILDER_SECRET = os.environ.get("POLY_BUILDER_SECRET", "")
@@ -557,9 +563,12 @@ def main() -> None:
             log.error("Cycle error: %s", exc, exc_info=True)
 
         # ── In-play scan (every cycle) ───────────────────────
-        try:
+        if not IN_PLAY_ENABLED:
+            pass
+        else:
+          try:
             in_play_markets = scan_in_play_markets(
-                min_elapsed_sec=60, max_elapsed_sec=180,
+                min_elapsed_sec=IN_PLAY_MIN_ELAPSED, max_elapsed_sec=IN_PLAY_MAX_ELAPSED,
             )
             for ip_mkt in in_play_markets:
                 if shutdown_requested:
@@ -567,7 +576,7 @@ def main() -> None:
                 if ip_mkt["slug"] in traded_slugs:
                     continue
                 ip_signal = analyze_in_play(
-                    ip_mkt, min_move_pct=0.08, min_edge=MIN_EDGE,
+                    ip_mkt, min_move_pct=IN_PLAY_MIN_MOVE, min_edge=MIN_EDGE,
                 )
                 if ip_signal is None:
                     continue
@@ -614,7 +623,7 @@ def main() -> None:
                         "fear_greed": None,
                         "mode": "in-play",
                     })
-        except Exception as exc:
+          except Exception as exc:
             log.debug("In-play scan error: %s", exc)
 
         # ── Resolution check (every 5 cycles) ────────────────
