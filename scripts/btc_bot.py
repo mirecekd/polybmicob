@@ -38,6 +38,7 @@ from py_clob_client.order_builder.constants import BUY
 from lib.btc_market_scanner import scan_btc_5m_markets
 from lib.price_feed import get_btc_momentum, get_fear_greed_index
 from lib.claim_winnings import claim_all_winnings
+from lib.in_play_engine import analyze_in_play, scan_in_play_markets
 from lib.resolution_tracker import resolve_trades
 from lib.signal_engine import (
     OrderbookSignal,
@@ -554,6 +555,67 @@ def main() -> None:
             run_cycle(dry_run=dry_run)
         except Exception as exc:
             log.error("Cycle error: %s", exc, exc_info=True)
+
+        # ── In-play scan (every cycle) ───────────────────────
+        try:
+            in_play_markets = scan_in_play_markets(
+                min_elapsed_sec=60, max_elapsed_sec=180,
+            )
+            for ip_mkt in in_play_markets:
+                if shutdown_requested:
+                    break
+                if ip_mkt["slug"] in traded_slugs:
+                    continue
+                ip_signal = analyze_in_play(
+                    ip_mkt, min_move_pct=0.08, min_edge=MIN_EDGE,
+                )
+                if ip_signal is None:
+                    continue
+
+                log.info(
+                    "  IN-PLAY SIGNAL: %s on %s  edge=%.1f%%  BTC %+.3f%% (%ds elapsed)",
+                    ip_signal.direction.upper(),
+                    ip_signal.slug,
+                    ip_signal.edge * 100,
+                    ip_signal.btc_move_pct,
+                    ip_signal.elapsed_sec,
+                )
+
+                # Create a TradeSignal-compatible object for place_trade
+                ip_trade_signal = TradeSignal(
+                    direction=ip_signal.direction,
+                    token_id=ip_signal.token_id,
+                    entry_price=ip_signal.entry_price,
+                    edge=ip_signal.edge,
+                    confidence=ip_signal.confidence,
+                    reason=ip_signal.reason,
+                    market_slug=ip_signal.slug,
+                )
+
+                client = get_clob_client()
+                result = place_trade(client, ip_trade_signal, MAX_TRADE_USD, dry_run=dry_run)
+
+                if result is not None:
+                    order_id = result.get("orderID", result.get("id", "unknown"))
+                    traded_slugs.add(ip_signal.slug)
+                    save_trade({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "slug": ip_signal.slug,
+                        "direction": ip_signal.direction,
+                        "token_id": ip_signal.token_id,
+                        "entry_price": ip_signal.entry_price,
+                        "edge": round(ip_signal.edge, 4),
+                        "confidence": round(ip_signal.confidence, 4),
+                        "reason": ip_signal.reason,
+                        "order_id": order_id,
+                        "dry_run": dry_run,
+                        "btc_price": ip_signal.btc_now,
+                        "momentum": round(ip_signal.btc_move_pct, 4),
+                        "fear_greed": None,
+                        "mode": "in-play",
+                    })
+        except Exception as exc:
+            log.debug("In-play scan error: %s", exc)
 
         # ── Resolution check (every 5 cycles) ────────────────
         if cycle_count % 5 == 0:

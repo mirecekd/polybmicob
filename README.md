@@ -398,6 +398,47 @@ CLAIM_EVERY_N_CYCLES=10    # Check every 10 cycles (default)
 
 ---
 
+## Backtesting
+
+Standalone script to validate the strategy against historical BTC data from Binance.
+
+```bash
+python scripts/backtest.py                     # last 24 hours
+python scripts/backtest.py --hours 72          # last 3 days
+python scripts/backtest.py --hours 168         # last week
+python scripts/backtest.py --edge 0.10         # higher edge threshold
+```
+
+**Important:** Backtesting only uses momentum signal (40% weight). It does NOT have access to historical Polymarket orderbook data (45% weight), so results are conservative compared to live trading. Live trading achieved 52.9% WR vs backtest ~46%.
+
+### Output Example
+
+```
+BACKTEST RESULTS - Last 24h (288 candles)
+  Signals generated:  121 (skipped 166, min_edge=5%)
+  Win Rate:           46.3%
+  Simulated P&L:      $-4.50
+  UP bets:    28W / 33L  (46%)
+  DOWN bets:  28W / 32L  (47%)
+  Hour (UTC)  Signals  WinRate
+  00:00          8       75%
+  14:00          8       75%
+  ...
+```
+
+---
+
+## Resolution Tracking
+
+The bot automatically tracks win/loss outcomes for every trade via CLOB API.
+
+- Every 5 bot cycles (~2.5 min), checks unresolved trades against CLOB `/markets/{conditionId}`
+- Matches `tokens[].winner` to determine if our bet won or lost
+- Updates `data/btc_trades.json` with `resolved`, `won`, `pnl` fields
+- Dashboard shows real P&L, win rate, streak, and UP/DOWN breakdown
+
+---
+
 ## Development Notes
 
 - **Python 3.12+** required

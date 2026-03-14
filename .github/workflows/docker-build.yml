@@ -25,7 +25,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: mirecekd/diktator
+  IMAGE_NAME: mirecekd/polybmicob
 
 jobs:
   build-and-push:
