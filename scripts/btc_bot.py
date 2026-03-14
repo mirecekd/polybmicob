@@ -65,6 +65,8 @@ MAX_TRADE_USD = float(os.environ.get("MAX_TRADE_USD", "1.00"))
 MIN_BALANCE_USD = float(os.environ.get("MIN_BALANCE_USD", "3.00"))
 MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "3"))
 MIN_EDGE = float(os.environ.get("MIN_EDGE", "0.10"))
+MIN_EDGE_UP = float(os.environ.get("MIN_EDGE_UP", "") or os.environ.get("MIN_EDGE", "0.10"))
+MIN_EDGE_DOWN = float(os.environ.get("MIN_EDGE_DOWN", "") or os.environ.get("MIN_EDGE", "0.10"))
 MAX_DAILY_LOSS_USD = float(os.environ.get("MAX_DAILY_LOSS_USD", "3.00"))
 MAX_CONSECUTIVE_LOSSES = int(os.environ.get("MAX_CONSECUTIVE_LOSSES", "5"))
 PAUSE_AFTER_LOSSES_SEC = int(os.environ.get("PAUSE_AFTER_LOSSES_SEC", "1800"))
@@ -78,6 +80,18 @@ RPC_URL = os.environ.get("CHAINSTACK_NODE", "https://polygon-bor-rpc.publicnode.
 
 # Auto-claim: check for redeemable positions every N cycles (~7.5 min at 45s interval)
 CLAIM_EVERY_N_CYCLES = int(os.environ.get("CLAIM_EVERY_N_CYCLES", "10"))
+
+# Hour-of-day filter (UTC hours when trading is allowed, empty = all hours)
+# Based on backtest: best hours are 00,04,07,08,14,15,16,17,18 UTC
+TRADING_HOURS_STR = os.environ.get("TRADING_HOURS_UTC", "")
+TRADING_HOURS: set[int] | None = (
+    {int(h.strip()) for h in TRADING_HOURS_STR.split(",") if h.strip()}
+    if TRADING_HOURS_STR.strip()
+    else None
+)
+
+# Minimum momentum to generate a pre-market signal (%)
+MIN_MOMENTUM_PCT = float(os.environ.get("MIN_MOMENTUM_PCT", "0.05"))
 
 # In-play mode: bet on markets already running (60-180s after start)
 IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
@@ -336,6 +350,12 @@ def run_cycle(dry_run: bool = False) -> None:
 
     now = time.time()
 
+    # Hour-of-day filter
+    current_hour = datetime.now(timezone.utc).hour
+    if TRADING_HOURS is not None and current_hour not in TRADING_HOURS:
+        log.info("Hour %02d UTC not in trading hours, skipping.", current_hour)
+        return
+
     # Check if paused after consecutive losses
     if now < paused_until:
         remaining = int(paused_until - now)
@@ -368,6 +388,11 @@ def run_cycle(dry_run: bool = False) -> None:
         )
     except Exception as exc:
         log.error("Price feed failed: %s", exc)
+        return
+
+    # ── 2b. Momentum threshold filter ────────────────────────
+    if abs(snapshot.momentum_5m) < MIN_MOMENTUM_PCT:
+        log.info("  Momentum %.3f%% < %.2f%% threshold, skipping pre-market.", snapshot.momentum_5m, MIN_MOMENTUM_PCT)
         return
 
     # ── 3. Get sentiment (non-critical) ──────────────────────
@@ -406,7 +431,8 @@ def run_cycle(dry_run: bool = False) -> None:
             client, mkt.up_token_id, mkt.down_token_id
         )
 
-        # Generate signal
+        # Generate signal with lower threshold, then apply asymmetric filter
+        effective_min_edge = min(MIN_EDGE_UP, MIN_EDGE_DOWN)
         sig = generate_signal(
             momentum_pct=snapshot.momentum_5m,
             trend=snapshot.trend,
@@ -417,8 +443,19 @@ def run_cycle(dry_run: bool = False) -> None:
             market_slug=mkt.slug,
             orderbook=ob_signal,
             fear_greed_value=fg_value,
-            min_edge=MIN_EDGE,
+            min_edge=effective_min_edge,
         )
+
+        # Apply asymmetric edge threshold per direction
+        if sig is not None:
+            required_edge = MIN_EDGE_UP if sig.direction == "up" else MIN_EDGE_DOWN
+            if sig.edge < required_edge:
+                log.info(
+                    "  %s: SKIP %s (edge %.1f%% < %.0f%% %s threshold)",
+                    mkt.slug, sig.direction.upper(),
+                    sig.edge * 100, required_edge * 100, sig.direction.upper(),
+                )
+                sig = None
 
         # Also generate a "what-if" signal at 0% edge for dry-run visibility
         if sig is None and dry_run:
@@ -575,10 +612,16 @@ def main() -> None:
                     break
                 if ip_mkt["slug"] in traded_slugs:
                     continue
+                ip_edge = min(MIN_EDGE_UP, MIN_EDGE_DOWN)
                 ip_signal = analyze_in_play(
-                    ip_mkt, min_move_pct=IN_PLAY_MIN_MOVE, min_edge=MIN_EDGE,
+                    ip_mkt, min_move_pct=IN_PLAY_MIN_MOVE, min_edge=ip_edge,
                 )
                 if ip_signal is None:
+                    continue
+
+                # Asymmetric edge for in-play too
+                ip_required = MIN_EDGE_UP if ip_signal.direction == "up" else MIN_EDGE_DOWN
+                if ip_signal.edge < ip_required:
                     continue
 
                 log.info(
