@@ -45,6 +45,88 @@ def get_log_tail(lines: int = 30) -> str:
         return "Error reading log."
 
 
+def parse_today_activity() -> dict:
+    """Parse today's bot log for activity stats (cycles, skips, signals, errors)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    result = {
+        "today": today,
+        "total_cycles": 0,
+        "momentum_skips": 0,
+        "no_signal": 0,
+        "pre_signals": 0,
+        "inplay_signals": 0,
+        "orders_placed": 0,
+        "orders_failed": 0,
+        "trades_resolved": 0,
+        "hourly": {},  # hour -> {cycles, skips, signals, orders}
+        "last_order_time": None,
+        "last_signal_time": None,
+        "fail_reasons": [],
+    }
+
+    if not LOG_FILE.exists():
+        return result
+
+    try:
+        text = LOG_FILE.read_text()
+    except OSError:
+        return result
+
+    for line in text.split("\n"):
+        if not line.startswith(today):
+            continue
+
+        # Extract hour
+        try:
+            hour = line[11:13]
+        except IndexError:
+            continue
+
+        if hour not in result["hourly"]:
+            result["hourly"][hour] = {"cycles": 0, "skips": 0, "signals": 0, "orders": 0}
+
+        if "Found" in line and "upcoming BTC 5m markets" in line:
+            result["total_cycles"] += 1
+            result["hourly"][hour]["cycles"] += 1
+
+        elif "threshold, skipping pre-market" in line:
+            result["momentum_skips"] += 1
+            result["hourly"][hour]["skips"] += 1
+
+        elif "no signal" in line:
+            result["no_signal"] += 1
+
+        elif "SIGNAL:" in line and "IN-PLAY" not in line:
+            result["pre_signals"] += 1
+            result["hourly"][hour]["signals"] += 1
+            result["last_signal_time"] = line[:19]
+
+        elif "IN-PLAY SIGNAL:" in line:
+            result["inplay_signals"] += 1
+            result["hourly"][hour]["signals"] += 1
+            result["last_signal_time"] = line[:19]
+
+        elif "ORDER PLACED:" in line:
+            result["orders_placed"] += 1
+            result["hourly"][hour]["orders"] += 1
+            result["last_order_time"] = line[:19]
+
+        elif "Trade failed:" in line:
+            result["orders_failed"] += 1
+            # Extract short reason
+            if "minimum:" in line:
+                result["fail_reasons"].append("min_size")
+            elif "balance" in line.lower():
+                result["fail_reasons"].append("balance")
+            else:
+                result["fail_reasons"].append("other")
+
+        elif "Resolved" in line and "trade(s)" in line:
+            result["trades_resolved"] += 1
+
+    return result
+
+
 def compute_stats(trades: list[dict]) -> dict:
     total = len(trades)
     live_trades = [t for t in trades if not t.get("dry_run", True)]
@@ -81,6 +163,7 @@ def render_html() -> str:
     trades = load_trades()
     stats = compute_stats(trades)
     log_tail = get_log_tail(40)
+    activity = parse_today_activity()
 
     # Streak display
     streak = stats["streak"]
@@ -268,6 +351,67 @@ def render_html() -> str:
   </div>
 </details>
 """}
+
+<details>
+  <summary>Today's Activity ({activity['today']})</summary>
+  <div class="expand-content" style="padding:16px;">
+    <div class="stats-row" style="margin-bottom:16px;">
+      <div class="stat">
+        <div class="val">{activity['total_cycles']}</div>
+        <div class="lbl">Cycles</div>
+      </div>
+      <div class="stat">
+        <div class="val" style="color:{'#f85149' if activity['momentum_skips'] > activity['total_cycles'] * 0.5 else '#8b949e'}">{activity['momentum_skips']}</div>
+        <div class="lbl">Momentum Skips</div>
+      </div>
+      <div class="stat">
+        <div class="val">{activity['no_signal']}</div>
+        <div class="lbl">No Signal</div>
+      </div>
+      <div class="stat">
+        <div class="val" style="color:#58a6ff">{activity['pre_signals']}</div>
+        <div class="lbl">Pre-Market Signals</div>
+      </div>
+      <div class="stat">
+        <div class="val" style="color:#d29922">{activity['inplay_signals']}</div>
+        <div class="lbl">In-Play Signals</div>
+      </div>
+      <div class="stat">
+        <div class="val" style="color:#3fb950">{activity['orders_placed']}</div>
+        <div class="lbl">Orders Placed</div>
+      </div>
+      <div class="stat">
+        <div class="val" style="color:{'#f85149' if activity['orders_failed'] > 0 else '#8b949e'}">{activity['orders_failed']}</div>
+        <div class="lbl">Orders Failed</div>
+      </div>
+      <div class="stat">
+        <div class="val">{activity['trades_resolved']}</div>
+        <div class="lbl">Resolved</div>
+      </div>
+    </div>
+    <div style="font-size:12px; color:#8b949e; margin-bottom:8px;">
+      Last signal: <span style="color:#c9d1d9">{activity['last_signal_time'] or 'none'}</span>
+      &nbsp;&nbsp;|&nbsp;&nbsp;
+      Last order: <span style="color:#c9d1d9">{activity['last_order_time'] or 'none'}</span>
+      {'&nbsp;&nbsp;|&nbsp;&nbsp;<span style="color:#f85149">Failed: ' + ', '.join(set(activity['fail_reasons'])) + '</span>' if activity['fail_reasons'] else ''}
+    </div>
+    <table>
+    <thead>
+      <tr><th>Hour (UTC)</th><th>Cycles</th><th>Mom. Skip</th><th>Skip %</th><th>Signals</th><th>Orders</th></tr>
+    </thead>
+    <tbody>
+    {''.join(f"""<tr>
+      <td>{h}:00</td>
+      <td>{d['cycles']}</td>
+      <td style="color:{'#f85149' if d['skips'] > d['cycles'] * 0.8 else '#8b949e'}">{d['skips']}</td>
+      <td style="color:{'#f85149' if d['skips'] > d['cycles'] * 0.8 else '#8b949e'}">{d['skips']*100//d['cycles'] if d['cycles'] > 0 else 0}%</td>
+      <td style="color:{'#58a6ff' if d['signals'] > 0 else '#8b949e'}">{d['signals']}</td>
+      <td style="color:{'#3fb950' if d['orders'] > 0 else '#8b949e'}">{d['orders']}</td>
+    </tr>""" for h, d in sorted(activity['hourly'].items()))}
+    </tbody>
+    </table>
+  </div>
+</details>
 
 <details>
   <summary>Bot Log (last 40 lines)</summary>
