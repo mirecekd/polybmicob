@@ -22,6 +22,12 @@ data/*.tmp
 *.swp
 *.swo
 
+# Memory bank (local only, not shared)
+memory-bank/
+
+# Original dev spec (too large for git)
+SPEC.md
+
 # OS
 .DS_Store
 Thumbs.db
