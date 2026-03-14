@@ -25,7 +25,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib imporath
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -92,6 +92,9 @@ TRADING_HOURS: set[int] | None = (
 
 # Minimum momentum to generate a pre-market signal (%)
 MIN_MOMENTUM_PCT = float(os.environ.get("MIN_MOMENTUM_PCT", "0.05"))
+
+# Minimum order size in shares (Polymarket enforces a minimum, may vary)
+MIN_ORDER_SIZE = int(os.environ.get("MIN_ORDER_SIZE", "5"))
 
 # In-play mode: bet on markets already running (60-180s after start)
 IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
@@ -301,11 +304,10 @@ def place_trade(
 
         exec_price = max(exec_price, 0.02)
 
-        # Calculate shares (minimum order value $1.01)
+        # Calculate shares (enforce Polymarket minimum order size)
         size = round(size_usd / exec_price, 0)
-        while size * exec_price < 1.01:
-            size += 1
-
+        if size < MIN_ORDER_SIZE:
+            size = MIN_ORDER_SIZE
         log.info(
             "  Placing %s %s: %.0f shares @ $%.2f ($%.2f total)",
             "DRY-RUN" if dry_run else "ORDER",
