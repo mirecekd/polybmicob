@@ -357,7 +357,24 @@ def place_trade(
             price=exec_price, size=size, side=BUY, token_id=token_id
         )
         signed = client.create_order(order_args)
-        result = client.post_order(signed, OrderType.FOK)
+
+        # Retry with backoff on API errors
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                result = client.post_order(signed, OrderType.FOK)
+                break
+            except Exception as post_exc:
+                if attempt < max_retries:
+                    wait = RATE_LIMIT_SEC * (attempt + 1)
+                    log.warning("  Order attempt %d/%d failed: %s, retrying in %.1fs...",
+                                attempt + 1, max_retries + 1, post_exc, wait)
+                    time.sleep(wait)
+                else:
+                    log.error("  Trade failed after %d attempts: %s", max_retries + 1, post_exc)
+                    return None
+        else:
+            return None
 
         order_id = result.get("orderID", result.get("id", "unknown"))
         status = result.get("status", "unknown")
