@@ -279,13 +279,13 @@ def place_trade(
     dry_run: bool = False,
 ) -> dict | None:
     """
-    Place a GTC buy order for the given signal.
+    Place a FOK (Fill or Kill) buy order for the given signal.
 
-    Uses orderbook-aware pricing: market_price + $0.02, capped at best ask.
-    Ensures minimum order value of $1.01.
+    FOK = fill entirely and immediately, or cancel. No ghost orders.
+    Uses best ask price as limit (slippage protection).
 
     Returns:
-        Order result dict, or None on failure.
+        Order result dict with 'filled'=True, or None on failure/no fill.
     """
     token_id = signal.token_id
     price = signal.entry_price
@@ -305,21 +305,37 @@ def place_trade(
 
         asks = sorted(raw_book.get("asks", []), key=lambda a: float(a["price"]))
 
-        if asks:
-            best_ask = float(asks[0]["price"])
-            exec_price = round(min(price + 0.02, best_ask, 0.95), 2)
-        else:
-            exec_price = round(min(price + 0.02, 0.95), 2)
+        if not asks:
+            log.info("  No asks on orderbook, skipping (no liquidity)")
+            return None
 
+        best_ask = float(asks[0]["price"])
+
+        # For FOK: use best ask as our price (we buy at market)
+        # Cap at 0.95 to avoid overpaying
+        exec_price = round(min(best_ask, 0.95), 2)
         exec_price = max(exec_price, 0.02)
+
+        # Check available liquidity at this price level
+        available_size = sum(
+            float(a["size"]) for a in asks if float(a["price"]) <= exec_price
+        )
 
         # Calculate shares (enforce per-market minimum from API)
         size = round(size_usd / exec_price, 0)
         if size < min_order_size:
             size = min_order_size
 
+        # Check if enough liquidity exists
+        if available_size < size:
+            log.info(
+                "  Insufficient liquidity: need %.0f shares, only %.0f available @ $%.2f",
+                size, available_size, exec_price,
+            )
+            return None
+
         log.info(
-            "  Placing %s %s: %.0f shares @ $%.2f ($%.2f total)",
+            "  Placing %s %s (FOK): %.0f shares @ $%.2f ($%.2f total)",
             "DRY-RUN" if dry_run else "ORDER",
             signal.direction.upper(),
             size,
@@ -333,18 +349,25 @@ def place_trade(
                 "status": "dry-run",
                 "exec_price": exec_price,
                 "size": size,
+                "filled": True,
             }
 
         order_args = OrderArgs(
             price=exec_price, size=size, side=BUY, token_id=token_id
         )
         signed = client.create_order(order_args)
-        result = client.post_order(signed, OrderType.GTC)
+        result = client.post_order(signed, OrderType.FOK)
 
         order_id = result.get("orderID", result.get("id", "unknown"))
-        log.info("  ORDER PLACED: %s", order_id)
+        status = result.get("status", "unknown")
 
-        return result
+        if status == "MATCHED" or result.get("success"):
+            log.info("  ORDER FILLED (FOK): %s", order_id)
+            result["filled"] = True
+            return result
+        else:
+            log.warning("  ORDER NOT FILLED (FOK): %s status=%s", order_id, status)
+            return None
 
     except Exception as exc:
         log.error("  Trade failed: %s", exc)
