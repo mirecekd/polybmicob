@@ -356,12 +356,13 @@ def place_trade(
         order_args = OrderArgs(
             price=exec_price, size=size, side=BUY, token_id=token_id
         )
-        signed = client.create_order(order_args)
 
-        # Retry with backoff on API errors
+        # Retry with backoff on API errors (re-sign each attempt to avoid "Duplicated" rejection)
         max_retries = 2
+        result = None
         for attempt in range(max_retries + 1):
             try:
+                signed = client.create_order(order_args)
                 result = client.post_order(signed, OrderType.FOK)
                 break
             except Exception as post_exc:
@@ -373,7 +374,7 @@ def place_trade(
                 else:
                     log.error("  Trade failed after %d attempts: %s", max_retries + 1, post_exc)
                     return None
-        else:
+        if result is None:
             return None
 
         order_id = result.get("orderID", result.get("id", "unknown"))
