@@ -55,10 +55,12 @@ def parse_today_activity() -> dict:
         "no_signal": 0,
         "pre_signals": 0,
         "inplay_signals": 0,
-        "orders_placed": 0,
+        "orders_filled": 0,
+        "orders_not_filled": 0,
+        "orders_no_liquidity": 0,
         "orders_failed": 0,
         "trades_resolved": 0,
-        "hourly": {},  # hour -> {cycles, skips, signals, orders}
+        "hourly": {},  # hour -> {cycles, skips, signals, filled, not_filled}
         "last_order_time": None,
         "last_signal_time": None,
         "fail_reasons": [],
@@ -83,7 +85,7 @@ def parse_today_activity() -> dict:
             continue
 
         if hour not in result["hourly"]:
-            result["hourly"][hour] = {"cycles": 0, "skips": 0, "signals": 0, "orders": 0}
+            result["hourly"][hour] = {"cycles": 0, "skips": 0, "signals": 0, "filled": 0, "rejected": 0}
 
         if "Found" in line and "upcoming BTC 5m markets" in line:
             result["total_cycles"] += 1
@@ -106,20 +108,32 @@ def parse_today_activity() -> dict:
             result["hourly"][hour]["signals"] += 1
             result["last_signal_time"] = line[:19]
 
-        elif "ORDER PLACED:" in line or "ORDER FILLED" in line:
-            result["orders_placed"] += 1
-            result["hourly"][hour]["orders"] += 1
+        elif "ORDER FILLED" in line or "ORDER PLACED:" in line:
+            result["orders_filled"] += 1
+            result["hourly"][hour]["filled"] += 1
             result["last_order_time"] = line[:19]
+
+        elif "ORDER NOT FILLED" in line:
+            result["orders_not_filled"] += 1
+            result["hourly"][hour]["rejected"] += 1
+            result["fail_reasons"].append("not_filled")
+
+        elif "No asks on orderbook" in line:
+            result["orders_no_liquidity"] += 1
+            result["fail_reasons"].append("no_asks")
+
+        elif "Insufficient liquidity" in line:
+            result["orders_no_liquidity"] += 1
+            result["fail_reasons"].append("low_liq")
 
         elif "Trade failed:" in line:
             result["orders_failed"] += 1
-            # Extract short reason
             if "minimum:" in line:
                 result["fail_reasons"].append("min_size")
             elif "balance" in line.lower():
                 result["fail_reasons"].append("balance")
             else:
-                result["fail_reasons"].append("other")
+                result["fail_reasons"].append("error")
 
         elif "Resolved" in line and "trade(s)" in line:
             result["trades_resolved"] += 1
@@ -443,12 +457,12 @@ def render_html() -> str:
     <div class="lbl">In-Play Signals</div>
   </div>
   <div class="stat">
-    <div class="val" style="color:#3fb950">{activity['orders_placed']}</div>
-    <div class="lbl">Orders</div>
+    <div class="val" style="color:#3fb950">{activity['orders_filled']}</div>
+    <div class="lbl">Filled</div>
   </div>
   <div class="stat">
-    <div class="val" style="color:{'#f85149' if activity['orders_failed'] > 0 else '#8b949e'}">{activity['orders_failed']}</div>
-    <div class="lbl">Failed</div>
+    <div class="val" style="color:{'#f85149' if (activity['orders_not_filled'] + activity['orders_no_liquidity'] + activity['orders_failed']) > 0 else '#8b949e'}">{activity['orders_not_filled'] + activity['orders_no_liquidity'] + activity['orders_failed']}</div>
+    <div class="lbl">Rejected</div>
   </div>
   <div class="stat">
     <div class="val">{activity['trades_resolved']}</div>
@@ -485,7 +499,7 @@ def render_html() -> str:
     </div>
     <table>
     <thead>
-      <tr><th>Hour (UTC)</th><th>Cycles</th><th>Mom. Skip</th><th>Skip %</th><th>Signals</th><th>Orders</th></tr>
+      <tr><th>Hour (UTC)</th><th>Cycles</th><th>Mom. Skip</th><th>Skip %</th><th>Signals</th><th>Filled</th><th>Rejected</th></tr>
     </thead>
     <tbody>
     {''.join(f"""<tr>
@@ -494,7 +508,8 @@ def render_html() -> str:
       <td style="color:{'#f85149' if d['skips'] > d['cycles'] * 0.8 else '#8b949e'}">{d['skips']}</td>
       <td style="color:{'#f85149' if d['skips'] > d['cycles'] * 0.8 else '#8b949e'}">{d['skips']*100//d['cycles'] if d['cycles'] > 0 else 0}%</td>
       <td style="color:{'#58a6ff' if d['signals'] > 0 else '#8b949e'}">{d['signals']}</td>
-      <td style="color:{'#3fb950' if d['orders'] > 0 else '#8b949e'}">{d['orders']}</td>
+      <td style="color:{'#3fb950' if d['filled'] > 0 else '#8b949e'}">{d['filled']}</td>
+      <td style="color:{'#f85149' if d['rejected'] > 0 else '#8b949e'}">{d['rejected']}</td>
     </tr>""" for h, d in sorted(activity['hourly'].items()))}
     </tbody>
     </table>
