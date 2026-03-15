@@ -232,15 +232,7 @@ def render_charts(trades: list[dict]) -> str:
         y = dot_y(t.get("entry_price", 0.5))
         won = t.get("won", False)
         color = "#3fb950" if won else "#f85149"
-        direction = t.get("direction", "")
-        symbol = "M{x},{y2} L{x2},{y} L{x},{y1} L{x3},{y} Z".format(
-            x=x, y=y, y1=y-5, y2=y+5, x2=x+5, x3=x-5
-        ) if direction == "up" else f"M{x},{y2} L{x2},{y} L{x},{y1} L{x3},{y} Z".format(
-            x=x, y=y, y1=y+5, y2=y-5, x2=x+5, x3=x-5
-        )
-        # Simple circles instead of complex shapes
-        r = 4
-        dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r}" fill="{color}" opacity="0.8"/>'
+        dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}" opacity="0.8"/>'
 
     dots_svg = f"""<svg viewBox="0 0 {w} {h2}" style="width:100%;max-width:{w}px;height:auto;">
       <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h2-pad_t-pad_b}" fill="#0d1117" rx="4"/>
