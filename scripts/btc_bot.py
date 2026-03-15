@@ -311,12 +311,13 @@ def place_trade(
 
         best_ask = float(asks[0]["price"])
 
-        # For FOK: use best ask as our price (we buy at market)
-        # Cap at 0.95 to avoid overpaying
-        exec_price = round(min(best_ask, 0.95), 2)
+        # For FOK: use best ask + slippage tolerance (sweep 1 cent above)
+        # This allows filling across multiple ask levels for better fill rate
+        slippage = 0.01
+        exec_price = round(min(best_ask + slippage, 0.95), 2)
         exec_price = max(exec_price, 0.02)
 
-        # Check available liquidity at this price level
+        # Check available liquidity up to our price (may span multiple levels)
         available_size = sum(
             float(a["size"]) for a in asks if float(a["price"]) <= exec_price
         )
