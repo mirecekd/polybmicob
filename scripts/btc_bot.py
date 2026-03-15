@@ -643,6 +643,8 @@ def main() -> None:
             in_play_markets = scan_in_play_markets(
                 min_elapsed_sec=IN_PLAY_MIN_ELAPSED, max_elapsed_sec=IN_PLAY_MAX_ELAPSED,
             )
+            if in_play_markets:
+                log.info("In-play scan: %d market(s) in window", len(in_play_markets))
             for ip_mkt in in_play_markets:
                 if shutdown_requested:
                     break
@@ -703,7 +705,7 @@ def main() -> None:
                         "mode": "in-play",
                     })
           except Exception as exc:
-            log.debug("In-play scan error: %s", exc)
+            log.warning("In-play scan error: %s", exc)
 
         # ── Resolution check (every 5 cycles) ────────────────
         if cycle_count % 5 == 0:
