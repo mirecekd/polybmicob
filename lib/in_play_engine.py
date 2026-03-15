@@ -232,9 +232,9 @@ def analyze_in_play(
 
     # Skip if move is too small (noise)
     if abs(move_pct) < min_move_pct:
-        log.debug(
-            "  %s: skip in-play (move %.3f%% < %.2f%% threshold)",
-            slug, move_pct, min_move_pct,
+        log.info(
+            "  In-play %s: skip (BTC move %+.3f%% < %.2f%% threshold), %ds elapsed",
+            slug, move_pct, min_move_pct, elapsed,
         )
         return None
 
@@ -275,10 +275,10 @@ def analyze_in_play(
     edge = estimated_prob - market_prob
 
     if edge < min_edge:
-        log.debug(
-            "  %s: in-play edge %.1f%% < %.0f%% (BTC %+.3f%%, %s price=%.3f, est=%.3f)",
+        log.info(
+            "  In-play %s: low edge %.1f%% < %.0f%% (BTC %+.3f%%, %s mkt=%.2f est=%.2f), %ds elapsed",
             slug, edge * 100, min_edge * 100,
-            move_pct, direction, market_prob, estimated_prob,
+            move_pct, direction.upper(), market_prob, estimated_prob, elapsed,
         )
         return None
 

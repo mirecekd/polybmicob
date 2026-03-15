@@ -648,18 +648,28 @@ def main() -> None:
             for ip_mkt in in_play_markets:
                 if shutdown_requested:
                     break
-                if ip_mkt["slug"] in traded_slugs:
+                ip_slug = ip_mkt["slug"]
+                ip_elapsed = ip_mkt["elapsed"]
+                if ip_slug in traded_slugs:
+                    log.info("  In-play %s: skip (already traded), %ds elapsed", ip_slug, ip_elapsed)
                     continue
                 ip_edge = min(MIN_EDGE_UP, MIN_EDGE_DOWN)
                 ip_signal = analyze_in_play(
                     ip_mkt, min_move_pct=IN_PLAY_MIN_MOVE, min_edge=ip_edge,
                 )
                 if ip_signal is None:
+                    # analyze_in_play now logs the reason at INFO level
                     continue
 
                 # Asymmetric edge for in-play too
                 ip_required = MIN_EDGE_UP if ip_signal.direction == "up" else MIN_EDGE_DOWN
                 if ip_signal.edge < ip_required:
+                    log.info(
+                        "  In-play %s: SKIP %s (edge %.1f%% < %.0f%% %s threshold), BTC %+.3f%%",
+                        ip_slug, ip_signal.direction.upper(),
+                        ip_signal.edge * 100, ip_required * 100,
+                        ip_signal.direction.upper(), ip_signal.btc_move_pct,
+                    )
                     continue
 
                 log.info(
