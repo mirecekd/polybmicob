@@ -159,6 +159,103 @@ def compute_stats(trades: list[dict]) -> dict:
     }
 
 
+def render_charts(trades: list[dict]) -> str:
+    """Render inline SVG charts for resolved trades (last 48h or last 50)."""
+    resolved = [t for t in trades if t.get("resolved") is not None and not t.get("dry_run", True)]
+    if len(resolved) < 2:
+        return '<div class="muted" style="text-align:center;padding:20px;">Need at least 2 resolved trades for charts</div>'
+
+    # Use last 50 resolved trades
+    recent = resolved[-50:]
+
+    # ── Chart 1: Cumulative P&L ──────────────────────────────
+    w, h = 700, 160
+    pad_l, pad_r, pad_t, pad_b = 50, 20, 15, 25
+
+    cumulative = []
+    running = 0.0
+    for t in recent:
+        running += t.get("pnl", 0)
+        cumulative.append(round(running, 2))
+
+    min_pnl = min(cumulative)
+    max_pnl = max(cumulative)
+    pnl_range = max(max_pnl - min_pnl, 0.01)
+
+    chart_w = w - pad_l - pad_r
+    chart_h = h - pad_t - pad_b
+
+    def pnl_x(i):
+        return pad_l + (i / max(len(cumulative) - 1, 1)) * chart_w
+
+    def pnl_y(val):
+        return pad_t + chart_h - ((val - min_pnl) / pnl_range) * chart_h
+
+    # Zero line
+    zero_y = pnl_y(0) if min_pnl <= 0 <= max_pnl else None
+
+    # Build polyline points
+    points = " ".join(f"{pnl_x(i):.1f},{pnl_y(v):.1f}" for i, v in enumerate(cumulative))
+
+    # Fill area (to zero or bottom)
+    fill_base_y = zero_y if zero_y is not None else (pad_t + chart_h)
+    fill_points = f"{pnl_x(0):.1f},{fill_base_y:.1f} {points} {pnl_x(len(cumulative)-1):.1f},{fill_base_y:.1f}"
+
+    final_color = "#3fb950" if cumulative[-1] >= 0 else "#f85149"
+
+    pnl_svg = f"""<svg viewBox="0 0 {w} {h}" style="width:100%;max-width:{w}px;height:auto;">
+      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{chart_h}" fill="#0d1117" rx="4"/>
+      {'<line x1="' + str(pad_l) + '" y1="' + f"{zero_y:.1f}" + '" x2="' + str(w-pad_r) + '" y2="' + f"{zero_y:.1f}" + '" stroke="#30363d" stroke-dasharray="4,4"/>' if zero_y else ''}
+      <polygon points="{fill_points}" fill="{final_color}" opacity="0.1"/>
+      <polyline points="{points}" fill="none" stroke="{final_color}" stroke-width="2"/>
+      <text x="{pad_l - 5}" y="{pnl_y(max_pnl):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${max_pnl:+.2f}</text>
+      <text x="{pad_l - 5}" y="{pnl_y(min_pnl):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${min_pnl:+.2f}</text>
+      <text x="{w/2}" y="{h - 3}" fill="#6e7681" font-size="10" text-anchor="middle">Cumulative P&L (last {len(recent)} trades)</text>
+    </svg>"""
+
+    # ── Chart 2: Trade dots (time vs entry price, colored by win/loss) ──
+    h2 = 120
+    prices = [t.get("entry_price", 0.5) for t in recent]
+    min_price = min(prices) - 0.02
+    max_price = max(prices) + 0.02
+    price_range = max(max_price - min_price, 0.01)
+
+    def dot_x(i):
+        return pad_l + (i / max(len(recent) - 1, 1)) * chart_w
+
+    def dot_y(price):
+        return pad_t + (h2 - pad_t - pad_b) - ((price - min_price) / price_range) * (h2 - pad_t - pad_b)
+
+    dots = ""
+    for i, t in enumerate(recent):
+        x = dot_x(i)
+        y = dot_y(t.get("entry_price", 0.5))
+        won = t.get("won", False)
+        color = "#3fb950" if won else "#f85149"
+        direction = t.get("direction", "")
+        symbol = "M{x},{y2} L{x2},{y} L{x},{y1} L{x3},{y} Z".format(
+            x=x, y=y, y1=y-5, y2=y+5, x2=x+5, x3=x-5
+        ) if direction == "up" else f"M{x},{y2} L{x2},{y} L{x},{y1} L{x3},{y} Z".format(
+            x=x, y=y, y1=y+5, y2=y-5, x2=x+5, x3=x-5
+        )
+        # Simple circles instead of complex shapes
+        r = 4
+        dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r}" fill="{color}" opacity="0.8"/>'
+
+    dots_svg = f"""<svg viewBox="0 0 {w} {h2}" style="width:100%;max-width:{w}px;height:auto;">
+      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h2-pad_t-pad_b}" fill="#0d1117" rx="4"/>
+      <text x="{pad_l - 5}" y="{dot_y(max_price):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${max_price:.2f}</text>
+      <text x="{pad_l - 5}" y="{dot_y(min_price):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${min_price:.2f}</text>
+      {dots}
+      <text x="{w/2}" y="{h2 - 3}" fill="#6e7681" font-size="10" text-anchor="middle">Entry price: <tspan fill="#3fb950">WIN</tspan> / <tspan fill="#f85149">LOSS</tspan> (last {len(recent)} trades)</text>
+    </svg>"""
+
+    return f"""<div style="display:flex;flex-direction:column;gap:12px;padding:16px;">
+      {pnl_svg}
+      {dots_svg}
+    </div>"""
+
+
 def render_html() -> str:
     trades = load_trades()
     stats = compute_stats(trades)
@@ -366,6 +463,8 @@ def render_html() -> str:
     <div class="lbl">Resolved</div>
   </div>
 </div>
+
+{render_charts(trades)}
 
 {'<div class="empty">No trades yet. Start the bot to see data.</div>' if not trades else f"""
 <details>
