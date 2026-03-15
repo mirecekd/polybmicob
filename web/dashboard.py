@@ -11,7 +11,7 @@ Usage:
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
@@ -332,7 +332,11 @@ def render_html() -> str:
           <td>{mom:+.3f}%</td>
         </tr>"""
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_utc = datetime.now(timezone.utc)
+    et_offset = timedelta(hours=-4)  # EDT (Mar-Nov)
+    now_et = now_utc + et_offset
+    now = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_et_str = now_et.strftime("%H:%M ET")
     log_escaped = log_tail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     return f"""<!DOCTYPE html>
@@ -399,7 +403,7 @@ def render_html() -> str:
 <body>
 
 <h1>PolyBMiCoB</h1>
-<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now}</p>
+<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str}</p>
 
 <div class="hero">
   <div class="hero-card">
