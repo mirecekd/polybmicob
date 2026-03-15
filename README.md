@@ -6,15 +6,15 @@ Automated trading bot for **BTC 5-minute Up/Down prediction markets** on [Polyma
 
 ## How It Works
 
-Every 45 seconds, the bot:
+Every 20 seconds, the bot:
 
-1. **Scans** Gamma API for upcoming BTC 5-minute markets (starting in 1-6 minutes)
+1. **Scans** Gamma API for upcoming BTC 5-minute markets (starting in 18s-6min)
 2. **Fetches** BTC price and 5-minute momentum from Binance
 3. **Analyzes** Polymarket CLOB orderbooks for bid/ask imbalance
 4. **Fuses** three signals (momentum, orderbook, sentiment) to estimate true probability
-5. **Trades** via FOK (Fill or Kill) orders - instant fill or cancel, no ghost orders
+5. **Trades** via FOK (Fill or Kill) orders with retry + backoff - instant fill or cancel, no ghost orders
 6. **Holds to resolution** - 5-minute markets resolve too fast for active management
-7. **In-play mode**: Also analyzes markets already running (60-180s after start) by comparing real BTC movement with token prices
+7. **In-play mode**: Also analyzes markets already running (30-210s after start) by comparing real BTC movement with token prices
 
 ### The Markets
 
@@ -317,8 +317,10 @@ A built-in web dashboard shows live trade statistics. It runs automatically alon
 - **Today's activity cards:** Cycles, Mom. Skips, Pre/In-Play Signals, Filled, Rejected, Resolved
 - **SVG charts:** Cumulative P&L line chart + Trade dots (WIN/LOSS by entry price)
 - **Recent Trades:** Last 50 trades with mode (PRE/IN-PLAY), direction, edge, result, P&L
+- **In-Play Signal Analysis:** Every in-play signal with outcome (filled/low_liq/api_error/fok_killed), rejection reason badges
 - **Hourly Breakdown:** Per-hour cycles, momentum skips, signals, filled/rejected orders
 - **Bot Log:** Last 40 lines in real-time
+- **ET time:** Polymarket-local Eastern Time displayed next to UTC
 - **Auto-refresh:** Every 30 seconds
 
 ### Running the Dashboard
