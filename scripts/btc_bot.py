@@ -163,6 +163,58 @@ def restore_state_from_trades() -> None:
     )
 
 
+def _update_risk_state() -> None:
+    """
+    Recompute daily_loss_usd and consecutive_losses from today's resolved trades.
+
+    Called after resolution checks. This is more robust than in-memory tracking
+    because it survives restarts and reads the actual trade outcomes.
+    """
+    global daily_loss_usd, consecutive_losses, paused_until
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    trades = load_trades()
+
+    # Filter to today's resolved live trades
+    today_resolved = [
+        t for t in trades
+        if t.get("timestamp", "").startswith(today)
+        and t.get("resolved") is not None
+        and not t.get("dry_run", True)
+    ]
+
+    # Compute daily loss (sum of negative PnL only)
+    new_daily_loss = sum(
+        abs(t.get("pnl", 0)) for t in today_resolved if not t.get("won", False)
+    )
+
+    # Compute consecutive losses (from most recent trades backwards)
+    new_consec = 0
+    for t in reversed(today_resolved):
+        if not t.get("won", False):
+            new_consec += 1
+        else:
+            break
+
+    # Only log if values changed
+    if new_daily_loss != daily_loss_usd or new_consec != consecutive_losses:
+        daily_loss_usd = new_daily_loss
+        consecutive_losses = new_consec
+        log.info(
+            "Risk state: daily_loss=$%.2f/%s%.2f, consec_losses=%d/%d",
+            daily_loss_usd, "$", MAX_DAILY_LOSS_USD,
+            consecutive_losses, MAX_CONSECUTIVE_LOSSES,
+        )
+
+    # Trigger pause if consecutive losses exceeded
+    if consecutive_losses >= MAX_CONSECUTIVE_LOSSES and paused_until < time.time():
+        paused_until = time.time() + PAUSE_AFTER_LOSSES_SEC
+        log.warning(
+            "PAUSING: %d consecutive losses, pausing for %ds",
+            consecutive_losses, PAUSE_AFTER_LOSSES_SEC,
+        )
+
+
 def handle_shutdown(signum, frame):
     """Handle graceful shutdown on SIGINT/SIGTERM."""
     global shutdown_requested
@@ -642,6 +694,7 @@ def main() -> None:
 
     # Restore state from previous runs (prevents double-trading after restart)
     restore_state_from_trades()
+    _update_risk_state()
 
     cycle_count = 0
 
@@ -743,6 +796,12 @@ def main() -> None:
                     log.info("--- Resolved %d trade(s) ---", newly)
             except Exception as exc:
                 log.debug("Resolution check failed: %s", exc)
+
+            # Update daily loss + consecutive losses from resolved trades
+            try:
+                _update_risk_state()
+            except Exception:
+                pass
 
         # ── Auto-claim check (every N cycles) ────────────────
         if cycle_count % CLAIM_EVERY_N_CYCLES == 0 and FUNDER:
