@@ -64,7 +64,11 @@ def parse_today_activity() -> dict:
         "last_order_time": None,
         "last_signal_time": None,
         "fail_reasons": [],
+        "inplay_events": [],  # list of {time, market, dir, edge, btc_move, outcome, detail}
     }
+
+    # State for correlating in-play signals with outcomes
+    pending_ip_signal = None
 
     if not LOG_FILE.exists():
         return result
@@ -73,6 +77,15 @@ def parse_today_activity() -> dict:
         text = LOG_FILE.read_text()
     except OSError:
         return result
+
+    def _resolve_pending(outcome: str, detail: str = ""):
+        """Resolve a pending in-play signal with its outcome."""
+        nonlocal pending_ip_signal
+        if pending_ip_signal:
+            pending_ip_signal["outcome"] = outcome
+            pending_ip_signal["detail"] = detail
+            result["inplay_events"].append(pending_ip_signal)
+            pending_ip_signal = None
 
     for line in text.split("\n"):
         if not line.startswith(today):
@@ -104,39 +117,83 @@ def parse_today_activity() -> dict:
             result["last_signal_time"] = line[:19]
 
         elif "IN-PLAY SIGNAL:" in line:
+            # If there's still a pending signal without outcome, mark it unknown
+            _resolve_pending("unknown")
             result["inplay_signals"] += 1
             result["hourly"][hour]["signals"] += 1
             result["last_signal_time"] = line[:19]
+            # Parse: IN-PLAY SIGNAL: DOWN on btc-updown-5m-XXX  edge=7.0%  BTC -0.137% (90s elapsed)
+            ip_info = {"time": line[:19], "dir": "?", "market": "", "edge": "", "btc_move": "", "elapsed": ""}
+            try:
+                after_sig = line.split("IN-PLAY SIGNAL:")[1].strip()
+                parts = after_sig.split()
+                ip_info["dir"] = parts[0]  # UP or DOWN
+                ip_info["market"] = parts[2].replace("btc-updown-5m-", "5m-") if len(parts) > 2 else ""
+                for p in parts:
+                    if p.startswith("edge="):
+                        ip_info["edge"] = p.replace("edge=", "")
+                    elif p.startswith("+") or (p.startswith("-") and "%" in p):
+                        ip_info["btc_move"] = p
+                # Extract elapsed
+                if "(" in after_sig and "elapsed" in after_sig:
+                    ip_info["elapsed"] = after_sig.split("(")[1].split(")")[0]
+            except (IndexError, ValueError):
+                pass
+            pending_ip_signal = ip_info
 
         elif "ORDER FILLED" in line or "ORDER PLACED:" in line:
             result["orders_filled"] += 1
             result["hourly"][hour]["filled"] += 1
             result["last_order_time"] = line[:19]
+            _resolve_pending("filled")
 
         elif "ORDER NOT FILLED" in line:
             result["orders_not_filled"] += 1
             result["hourly"][hour]["rejected"] += 1
             result["fail_reasons"].append("not_filled")
+            _resolve_pending("not_filled", "FOK not filled")
 
         elif "No asks on orderbook" in line:
             result["orders_no_liquidity"] += 1
+            result["hourly"][hour]["rejected"] += 1
             result["fail_reasons"].append("no_asks")
+            _resolve_pending("no_asks", "Empty orderbook")
 
         elif "Insufficient liquidity" in line:
             result["orders_no_liquidity"] += 1
+            result["hourly"][hour]["rejected"] += 1
             result["fail_reasons"].append("low_liq")
+            # Extract detail like "need 5 shares, only 0 available @ $0.95"
+            detail = ""
+            if ":" in line.split("Insufficient liquidity")[1]:
+                detail = line.split("Insufficient liquidity:")[1].strip()
+            _resolve_pending("low_liq", detail or "Insufficient liquidity")
 
         elif "Trade failed:" in line:
             result["orders_failed"] += 1
+            result["hourly"][hour]["rejected"] += 1
+            detail = line.split("Trade failed:")[1].strip() if "Trade failed:" in line else ""
             if "minimum:" in line:
                 result["fail_reasons"].append("min_size")
+                _resolve_pending("min_size", detail)
             elif "balance" in line.lower():
                 result["fail_reasons"].append("balance")
+                _resolve_pending("balance", detail)
+            elif "FOK" in line or "fully filled" in line:
+                result["fail_reasons"].append("fok_killed")
+                _resolve_pending("fok_killed", "FOK order killed")
+            elif "Request exception" in line:
+                result["fail_reasons"].append("api_error")
+                _resolve_pending("api_error", "API request exception")
             else:
                 result["fail_reasons"].append("error")
+                _resolve_pending("error", detail)
 
         elif "Resolved" in line and "trade(s)" in line:
             result["trades_resolved"] += 1
+
+    # Resolve any trailing pending signal
+    _resolve_pending("unknown")
 
     return result
 
@@ -515,6 +572,32 @@ def render_html() -> str:
       <td style="color:{'#3fb950' if d['filled'] > 0 else '#8b949e'}">{d['filled']}</td>
       <td style="color:{'#f85149' if d['rejected'] > 0 else '#8b949e'}">{d['rejected']}</td>
     </tr>""" for h, d in sorted(activity['hourly'].items()))}
+    </tbody>
+    </table>
+  </div>
+</details>
+
+<details>
+  <summary>In-Play Signal Analysis ({len(activity['inplay_events'])} signals, {sum(1 for e in activity['inplay_events'] if e['outcome'] == 'filled')} filled, {sum(1 for e in activity['inplay_events'] if e['outcome'] not in ('filled', 'unknown'))} rejected)</summary>
+  <div class="expand-content" style="padding:16px;">
+    <div style="font-size:12px; color:#8b949e; margin-bottom:12px;">
+      {''.join(f'<span style="display:inline-block;background:#21262d;border-radius:4px;padding:4px 10px;margin:0 6px 6px 0;font-size:11px;"><span style="color:#c9d1d9">{r}</span> <span style="color:#f85149;font-weight:700">{activity["fail_reasons"].count(r)}</span></span>' for r in sorted(set(activity['fail_reasons'])))}
+    </div>
+    <table>
+    <thead>
+      <tr><th>Time</th><th>Dir</th><th>Market</th><th>Edge</th><th>BTC Move</th><th>Elapsed</th><th>Outcome</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+    {''.join(f"""<tr>
+      <td class="muted">{e['time'][11:]}</td>
+      <td class="{'up' if e['dir'] == 'UP' else 'down'}">{e['dir']}</td>
+      <td>{e['market']}</td>
+      <td>{e['edge']}</td>
+      <td>{e['btc_move']}</td>
+      <td class="muted">{e['elapsed']}</td>
+      <td style="color:{'#3fb950' if e['outcome'] == 'filled' else '#f85149' if e['outcome'] not in ('unknown',) else '#8b949e'};font-weight:600">{e['outcome']}</td>
+      <td class="muted">{e.get('detail', '')}</td>
+    </tr>""" for e in reversed(activity['inplay_events'])) if activity['inplay_events'] else '<tr><td colspan="8" class="muted" style="text-align:center;padding:20px;">No in-play signals today</td></tr>'}
     </tbody>
     </table>
   </div>
