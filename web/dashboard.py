@@ -106,7 +106,7 @@ def parse_today_activity() -> dict:
             result["hourly"][hour]["signals"] += 1
             result["last_signal_time"] = line[:19]
 
-        elif "ORDER PLACED:" in line:
+        elif "ORDER PLACED:" in line or "ORDER FILLED" in line:
             result["orders_placed"] += 1
             result["hourly"][hour]["orders"] += 1
             result["last_order_time"] = line[:19]
