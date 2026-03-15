@@ -12,8 +12,9 @@ Every 45 seconds, the bot:
 2. **Fetches** BTC price and 5-minute momentum from Binance
 3. **Analyzes** Polymarket CLOB orderbooks for bid/ask imbalance
 4. **Fuses** three signals (momentum, orderbook, sentiment) to estimate true probability
-5. **Trades** when estimated probability exceeds market price by 10%+ (the "edge")
+5. **Trades** via FOK (Fill or Kill) orders - instant fill or cancel, no ghost orders
 6. **Holds to resolution** - 5-minute markets resolve too fast for active management
+7. **In-play mode**: Also analyzes markets already running (60-180s after start) by comparing real BTC movement with token prices
 
 ### The Markets
 
@@ -311,10 +312,14 @@ A built-in web dashboard shows live trade statistics. It runs automatically alon
 
 ### What It Shows
 
-- **Stat cards:** Total trades, live/dry count, UP/DOWN split, average edge, confidence, total invested, expected P&L
-- **Trades table:** Last 50 trades with timestamp, market slug, direction, entry price, edge, confidence, BTC price, momentum, Fear & Greed
-- **Bot log:** Last 40 lines of the bot log in real-time
-- **Auto-refresh:** Page refreshes every 30 seconds
+- **Hero cards:** Real P&L, Win Rate, Streak, Total Trades
+- **Stats row:** UP/DOWN win rates, Avg Confidence
+- **Today's activity cards:** Cycles, Mom. Skips, Pre/In-Play Signals, Filled, Rejected, Resolved
+- **SVG charts:** Cumulative P&L line chart + Trade dots (WIN/LOSS by entry price)
+- **Recent Trades:** Last 50 trades with mode (PRE/IN-PLAY), direction, edge, result, P&L
+- **Hourly Breakdown:** Per-hour cycles, momentum skips, signals, filled/rejected orders
+- **Bot Log:** Last 40 lines in real-time
+- **Auto-refresh:** Every 30 seconds
 
 ### Running the Dashboard
 
@@ -439,9 +444,25 @@ The bot automatically tracks win/loss outcomes for every trade via CLOB API.
 
 ---
 
+## Deployment (GHCR)
+
+Pre-built multi-arch images (amd64 + arm64) are published via GitHub Actions CI/CD to GHCR:
+
+```bash
+# Pull and run (e.g. on Raspberry Pi)
+docker pull ghcr.io/mirecekd/polybmicob
+docker run -d -p 8005:8005 \
+  --name polybmicob \
+  --restart always \
+  --env-file /path/to/.env \
+  -v /path/to/data:/app/data \
+  ghcr.io/mirecekd/polybmicob
+```
+
+---
+
 ## Development Notes
 
 - **Python 3.12+** required
 - **Virtual environment:** `workon polybmicob`
-- **Original spec:** See `SPEC.md` for the full 1000-line development specification including API response structures, CLOB trading patterns, and market analysis data
 - **Reference implementation:** Studied [Polymarket-BTC-15-Minute-Trading-Bot](https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot) for signal fusion architecture
