@@ -312,16 +312,47 @@ A built-in web dashboard shows live trade statistics. It runs automatically alon
 
 ### What It Shows
 
-- **Hero cards:** Real P&L, Win Rate, Streak, Total Trades
-- **Stats row:** UP/DOWN win rates, Avg Confidence
-- **Today's activity cards:** Cycles, Mom. Skips, Pre/In-Play Signals, Filled, Rejected, Resolved
+- **Header:** UTC time, ET time, and current **market session indicator** (color-coded)
+- **Hero cards:** Wallet USDC (on-chain balance), Today P&L, All-Time P&L, Win Rate, Streak
+- **Stats row 1:** Total Trades, UP/DOWN Win Rates, Avg Confidence, Avg Edge
+- **Stats row 2 (today):** Cycles, Mom. Skips, Pre/In-Play Signals, Filled, Rejected, Resolved
 - **SVG charts:** Cumulative P&L line chart + Trade dots (WIN/LOSS by entry price)
 - **Recent Trades:** Last 50 trades with mode (PRE/IN-PLAY), direction, edge, result, P&L
-- **In-Play Signal Analysis:** Every in-play signal with outcome (filled/low_liq/api_error/fok_killed), rejection reason badges
+- **In-Play Signal Analysis:** Every in-play signal with outcome tracking
 - **Hourly Breakdown:** Per-hour cycles, momentum skips, signals, filled/rejected orders
 - **Bot Log:** Last 40 lines in real-time
-- **ET time:** Polymarket-local Eastern Time displayed next to UTC
 - **Auto-refresh:** Every 30 seconds
+
+### Market Session Indicator
+
+The header shows the current trading session with color-coded volatility expectation:
+
+| Session | UTC | Color | Expected Volatility |
+|---------|-----|-------|---------------------|
+| Asia Session (Tokyo) | 00:00-03:00 | Yellow | Medium |
+| Dead Zone | 03:00-07:00 | Gray | Low - few signals |
+| Asia/Europe Overlap | 07:00-08:00 | Yellow | Medium |
+| EU Session | 08:00-12:00 | Blue | Good |
+| US Pre-Market | 12:00-14:30 | Yellow | Rising |
+| US Session - Peak | 14:30-21:00 | Green | **Highest** - best for trading |
+| US Close / After-Hours | 21:00-23:00 | Yellow | Good |
+| Late Night | 23:00-00:00 | Gray | Low |
+
+### Dashboard Color Legend
+
+| Color | Hex | Meaning | Used For |
+|-------|-----|---------|----------|
+| Green | `#3fb950` | Positive / Good | WIN, profit, filled orders, US Session |
+| Red | `#f85149` | Negative / Bad | LOSS, rejected, daily loss |
+| Blue | `#58a6ff` | Info / Neutral | Signals, EU session, total trades, links |
+| Yellow | `#d29922` | Warning / Medium | In-play, wallet balance, transition sessions |
+| Gray | `#8b949e` | Inactive / Muted | Dead zone, pending, secondary text |
+
+### Performance
+
+Dashboard reads pre-computed stats from `data/dashboard_stats.json` (O(1) read, ~2-5 KB) instead of parsing the entire log file. Activity counters are updated incrementally by the bot as events happen.
+
+Log rotation: `btc_bot.log` uses `RotatingFileHandler` (2 MB per file, 5 backup files, max ~12 MB total).
 
 ### Running the Dashboard
 
@@ -412,8 +443,6 @@ Standalone script to validate the strategy against historical BTC data from Bina
 ```bash
 python scripts/backtest.py                     # last 24 hours
 python scripts/backtest.py --hours 72          # last 3 days
-python scripts/backtest.py --hours 168         # last week
-python scripts/backtest.py --edge 0.10         # higher edge threshold
 ```
 
 **Important:** Backtesting only uses momentum signal (40% weight). It does NOT have access to historical Polymarket orderbook data (45% weight), so results are conservative compared to live trading. Live trading achieved 52.9% WR vs backtest ~46%.
