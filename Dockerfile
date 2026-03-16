@@ -9,6 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Build metadata (set by CI/CD via --build-arg)
+ARG VERSION=dev
+ARG BUILD_DATE=unknown
+ARG GIT_COMMIT=unknown
+ENV APP_VERSION=${VERSION} \
+    APP_BUILD_DATE=${BUILD_DATE} \
+    APP_GIT_COMMIT=${GIT_COMMIT}
+
 # Copy source code
 COPY lib/ lib/
 COPY scripts/ scripts/

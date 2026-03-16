@@ -876,8 +876,14 @@ def main() -> None:
     bot_mode = os.environ.get("BOT_MODE", "dry-run").strip().lower()
     dry_run = "--dry-run" in sys.argv or bot_mode != "live"
 
+    # Build metadata (set by Dockerfile ARG -> ENV)
+    app_version = os.environ.get("APP_VERSION", "dev")
+    app_commit = os.environ.get("APP_GIT_COMMIT", "unknown")[:7]
+    app_build = os.environ.get("APP_BUILD_DATE", "unknown")
+
     log.info("=" * 60)
     log.info("PolyBMiCoB - BTC Micro-Cycle Options Bot")
+    log.info("Version: %s (commit %s, built %s)", app_version, app_commit, app_build)
     log.info("Mode: %s", "DRY RUN" if dry_run else "LIVE")
     log.info(
         "Config: max_trade=$%.2f, min_edge=%.0f%%, scan=%d-%dm, interval=%ds",
