@@ -342,6 +342,19 @@ def render_html() -> str:
     pnl_color = "#3fb950" if stats["total_pnl"] >= 0 else "#f85149"
     wr_color = "#3fb950" if stats["win_rate"] >= 0.5 else "#f85149"
 
+    # Daily P&L from today's resolved trades
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_resolved = [
+        t for t in trades
+        if t.get("timestamp", "").startswith(today_str)
+        and t.get("resolved") is not None
+        and not t.get("dry_run", True)
+    ]
+    daily_pnl = sum(t.get("pnl", 0) for t in today_resolved)
+    daily_wins = sum(1 for t in today_resolved if t.get("won"))
+    daily_losses = sum(1 for t in today_resolved if not t.get("won"))
+    daily_pnl_color = "#3fb950" if daily_pnl >= 0 else "#f85149"
+
     # UP/DOWN breakdown
     up_total = stats["up_wins"] + stats["up_losses"]
     down_total = stats["down_wins"] + stats["down_losses"]
@@ -471,8 +484,13 @@ def render_html() -> str:
     <div class="detail">{'updated ' + wallet['updated_at'][11:16] + ' UTC' if wallet['updated_at'] else 'waiting for first check'}</div>
   </div>
   <div class="hero-card">
+    <div class="num" style="color:{daily_pnl_color}">${daily_pnl:+.2f}</div>
+    <div class="lbl">Today P&L</div>
+    <div class="detail">{daily_wins}W / {daily_losses}L today</div>
+  </div>
+  <div class="hero-card">
     <div class="num" style="color:{pnl_color}">${stats['total_pnl']:+.2f}</div>
-    <div class="lbl">Real P&L</div>
+    <div class="lbl">All-Time P&L</div>
     <div class="detail">${stats['total_invested']:.2f} invested</div>
   </div>
   <div class="hero-card">
