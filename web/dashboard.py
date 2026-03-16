@@ -502,8 +502,7 @@ def render_html() -> str:
 <body>
 
 <h1>PolyBMiCoB</h1>
-<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str}<br>
-<span style="color:{session_color};font-weight:600">{session_name}</span></p>
+<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str} / <span style="color:{session_color};font-weight:600">{session_name}</span></p>
 
 <div class="hero">
   <div class="hero-card">
