@@ -231,6 +231,97 @@ def compute_stats(trades: list[dict]) -> dict:
     }
 
 
+def _parse_trade_timestamps(trades: list[dict]) -> list[datetime]:
+    """Parse timestamps from trades into datetime objects."""
+    timestamps = []
+    for t in trades:
+        ts_str = t.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts_str)
+            timestamps.append(dt)
+        except (ValueError, TypeError):
+            timestamps.append(None)
+    return timestamps
+
+
+def _parse_market_time(slug: str) -> str | None:
+    """Extract market time from slug like 'btc-updown-5m-1773641100'."""
+    if not slug:
+        return None
+    parts = slug.split("-")
+    if len(parts) >= 4:
+        try:
+            epoch = int(parts[-1])
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            return dt.strftime("%H:%M")
+        except (ValueError, OSError):
+            pass
+    return None
+
+
+def _generate_time_ticks(timestamps: list[datetime | None], pad_l: int, chart_w: int, y_pos: float) -> str:
+    """Generate SVG time tick marks and labels for the X-axis."""
+    valid = [(i, ts) for i, ts in enumerate(timestamps) if ts is not None]
+    if len(valid) < 2:
+        return ""
+
+    n = len(timestamps)
+    first_ts = valid[0][1]
+    last_ts = valid[-1][1]
+    total_seconds = (last_ts - first_ts).total_seconds()
+
+    if total_seconds <= 0:
+        return ""
+
+    # Decide tick interval based on total time span
+    if total_seconds <= 3600 * 2:       # <= 2h: every 15 min
+        interval_s = 900
+        fmt = "%H:%M"
+    elif total_seconds <= 3600 * 6:     # <= 6h: every 1h
+        interval_s = 3600
+        fmt = "%H:%M"
+    elif total_seconds <= 3600 * 24:    # <= 24h: every 2h
+        interval_s = 7200
+        fmt = "%H:%M"
+    elif total_seconds <= 3600 * 48:    # <= 48h: every 4h
+        interval_s = 14400
+        fmt = "%d %b %H:%M"
+    else:                                # > 48h: every 8h
+        interval_s = 28800
+        fmt = "%d %b %H:%M"
+
+    # Find first tick: round up first_ts to next interval boundary
+    epoch_first = first_ts.timestamp()
+    first_tick_epoch = ((int(epoch_first) // interval_s) + 1) * interval_s
+
+    svg_parts = []
+    tick_epoch = first_tick_epoch
+    last_tick_epoch = last_ts.timestamp()
+
+    while tick_epoch <= last_tick_epoch:
+        # Map this tick time to x position via interpolation
+        frac = (tick_epoch - epoch_first) / total_seconds
+        x = pad_l + frac * chart_w
+
+        tick_dt = datetime.fromtimestamp(tick_epoch, tz=timezone.utc)
+        label = tick_dt.strftime(fmt)
+
+        # Vertical grid line
+        svg_parts.append(
+            f'<line x1="{x:.1f}" y1="0" x2="{x:.1f}" y2="{y_pos:.1f}" '
+            f'stroke="#30363d" stroke-width="0.5" opacity="0.6"/>'
+        )
+        # Label
+        svg_parts.append(
+            f'<text x="{x:.1f}" y="{y_pos + 11:.1f}" fill="#6e7681" font-size="9" '
+            f'text-anchor="middle">{label}</text>'
+        )
+
+        tick_epoch += interval_s
+
+    return "\n      ".join(svg_parts)
+
+
 def render_charts(trades: list[dict]) -> str:
     """Render inline SVG charts for resolved trades (last 48h or last 50)."""
     resolved = [t for t in trades if t.get("resolved") is not None and not t.get("dry_run", True)]
@@ -240,9 +331,12 @@ def render_charts(trades: list[dict]) -> str:
     # Use last 50 resolved trades
     recent = resolved[-50:]
 
+    # Parse timestamps for time axis
+    timestamps = _parse_trade_timestamps(recent)
+
     # ── Chart 1: Cumulative P&L ──────────────────────────────
-    w, h = 1100, 160
-    pad_l, pad_r, pad_t, pad_b = 50, 20, 15, 25
+    w, h = 1100, 185
+    pad_l, pad_r, pad_t, pad_b = 50, 20, 15, 48
 
     cumulative = []
     running = 0.0
@@ -275,8 +369,11 @@ def render_charts(trades: list[dict]) -> str:
 
     final_color = "#3fb950" if cumulative[-1] >= 0 else "#f85149"
 
+    pnl_time_ticks = _generate_time_ticks(timestamps, pad_l, chart_w, pad_t + chart_h)
+
     pnl_svg = f"""<svg viewBox="0 0 {w} {h}" style="width:100%;height:auto;">
       <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{chart_h}" fill="#0d1117" rx="4"/>
+      {pnl_time_ticks}
       {'<line x1="' + str(pad_l) + '" y1="' + f"{zero_y:.1f}" + '" x2="' + str(w-pad_r) + '" y2="' + f"{zero_y:.1f}" + '" stroke="#30363d" stroke-dasharray="4,4"/>' if zero_y else ''}
       <polygon points="{fill_points}" fill="{final_color}" opacity="0.1"/>
       <polyline points="{points}" fill="none" stroke="{final_color}" stroke-width="2"/>
@@ -286,17 +383,29 @@ def render_charts(trades: list[dict]) -> str:
     </svg>"""
 
     # ── Chart 2: Trade dots (time vs entry price, colored by win/loss) ──
-    h2 = 120
+    h2 = 145
     prices = [t.get("entry_price", 0.5) for t in recent]
     min_price = min(prices) - 0.02
     max_price = max(prices) + 0.02
     price_range = max(max_price - min_price, 0.01)
+    chart_h2 = h2 - pad_t - pad_b
 
     def dot_x(i):
         return pad_l + (i / max(len(recent) - 1, 1)) * chart_w
 
     def dot_y(price):
-        return pad_t + (h2 - pad_t - pad_b) - ((price - min_price) / price_range) * (h2 - pad_t - pad_b)
+        return pad_t + chart_h2 - ((price - min_price) / price_range) * chart_h2
+
+    # Market time labels (from slug epoch) shown above dots
+    market_time_labels = ""
+    for i, t in enumerate(recent):
+        mt = _parse_market_time(t.get("slug", ""))
+        if mt:
+            x = dot_x(i)
+            market_time_labels += (
+                f'<text x="{x:.1f}" y="{pad_t - 2}" fill="#484f58" font-size="7" '
+                f'text-anchor="middle" transform="rotate(-45,{x:.1f},{pad_t - 2})">{mt}</text>'
+            )
 
     dots = ""
     for i, t in enumerate(recent):
@@ -306,26 +415,31 @@ def render_charts(trades: list[dict]) -> str:
         color = "#3fb950" if won else "#f85149"
         dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}" opacity="0.8"/>'
 
+    dots_time_ticks = _generate_time_ticks(timestamps, pad_l, chart_w, pad_t + chart_h2)
+
     dots_svg = f"""<svg viewBox="0 0 {w} {h2}" style="width:100%;height:auto;">
-      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h2-pad_t-pad_b}" fill="#0d1117" rx="4"/>
+      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{chart_h2}" fill="#0d1117" rx="4"/>
+      {dots_time_ticks}
       <text x="{pad_l - 5}" y="{dot_y(max_price):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${max_price:.2f}</text>
       <text x="{pad_l - 5}" y="{dot_y(min_price):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${min_price:.2f}</text>
       {dots}
-      <text x="{w/2}" y="{h2 - 3}" fill="#6e7681" font-size="10" text-anchor="middle">Entry price: <tspan fill="#3fb950">WIN</tspan> / <tspan fill="#f85149">LOSS</tspan> (last {len(recent)} trades)</text>
+      {market_time_labels}
+      <text x="{w/2}" y="{h2 - 3}" fill="#6e7681" font-size="10" text-anchor="middle">Entry price: <tspan fill="#3fb950">WIN</tspan> / <tspan fill="#f85149">LOSS</tspan> (last {len(recent)} trades) | <tspan fill="#484f58">rotated = market time UTC</tspan></text>
     </svg>"""
 
     # ── Chart 3: BTC price trend with trade markers ──────────
-    h3 = 140
+    h3 = 165
     btc_prices = [t.get("btc_price", 0) for t in recent]
     min_btc = min(btc_prices) - 50
     max_btc = max(btc_prices) + 50
     btc_range = max(max_btc - min_btc, 1)
+    chart_h3 = h3 - pad_t - pad_b
 
     def btc_x(i):
         return pad_l + (i / max(len(recent) - 1, 1)) * chart_w
 
     def btc_y(price):
-        return pad_t + (h3 - pad_t - pad_b) - ((price - min_btc) / btc_range) * (h3 - pad_t - pad_b)
+        return pad_t + chart_h3 - ((price - min_btc) / btc_range) * chart_h3
 
     # BTC price line
     btc_line = " ".join(f"{btc_x(i):.1f},{btc_y(p):.1f}" for i, p in enumerate(btc_prices))
@@ -347,8 +461,11 @@ def render_charts(trades: list[dict]) -> str:
     # BTC trend direction
     btc_trend_color = "#3fb950" if btc_prices[-1] >= btc_prices[0] else "#f85149"
 
+    btc_time_ticks = _generate_time_ticks(timestamps, pad_l, chart_w, pad_t + chart_h3)
+
     btc_svg = f"""<svg viewBox="0 0 {w} {h3}" style="width:100%;height:auto;">
-      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h3-pad_t-pad_b}" fill="#0d1117" rx="4"/>
+      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{chart_h3}" fill="#0d1117" rx="4"/>
+      {btc_time_ticks}
       <polyline points="{btc_line}" fill="none" stroke="#8b949e" stroke-width="1.5" opacity="0.6"/>
       {btc_markers}
       <text x="{pad_l - 5}" y="{btc_y(max_btc):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${max_btc:,.0f}</text>
