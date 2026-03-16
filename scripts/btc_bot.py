@@ -36,11 +36,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client.order_builder.constants import BUY, SELL
 
 from lib.btc_market_scanner import scan_btc_5m_markets
 from lib.price_feed import get_btc_momentum, get_fear_greed_index
 from lib.claim_winnings import claim_all_winnings
+from lib.early_exit import ExitSignal, check_early_exits
 from lib.in_play_engine import analyze_in_play, scan_in_play_markets
 from lib.resolution_tracker import resolve_trades
 from lib.signal_engine import (
@@ -115,6 +116,11 @@ IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
 IN_PLAY_MIN_ELAPSED = int(os.environ.get("IN_PLAY_MIN_ELAPSED_SEC", "60"))
 IN_PLAY_MAX_ELAPSED = int(os.environ.get("IN_PLAY_MAX_ELAPSED_SEC", "180"))
 IN_PLAY_MIN_MOVE = float(os.environ.get("IN_PLAY_MIN_MOVE_PCT", "0.08"))
+
+# Early exit: sell positions early to cut losses (hold-to-resolution by default)
+EARLY_EXIT_ENABLED = os.environ.get("EARLY_EXIT_ENABLED", "false").lower() == "true"
+STOP_LOSS_THRESHOLD = float(os.environ.get("STOP_LOSS_THRESHOLD", "0.30"))
+MOMENTUM_REVERSAL_PCT = float(os.environ.get("MOMENTUM_REVERSAL_PCT", "0.15"))
 
 # Builder API credentials (for gasless claiming via relayer)
 BUILDER_KEY = os.environ.get("POLY_BUILDER_API_KEY", "")
@@ -473,6 +479,147 @@ def place_trade(
 
 
 # ──────────────────────────────────────────────────────────────
+# Early exit (sell) execution
+# ──────────────────────────────────────────────────────────────
+
+
+def place_sell_order(
+    client: ClobClient,
+    exit_signal: ExitSignal,
+    dry_run: bool = False,
+) -> dict | None:
+    """
+    Place a FOK sell order to exit a position early.
+
+    Sells at best bid - slippage to ensure fill.
+
+    Returns:
+        Order result dict with 'filled'=True, or None on failure.
+    """
+    token_id = exit_signal.token_id
+    sell_price = exit_signal.current_price  # best bid from early_exit module
+
+    try:
+        # Fetch fresh orderbook for bids
+        raw_resp = httpx.get(
+            f"{CLOB_HOST}/book",
+            params={"token_id": token_id},
+            timeout=15,
+        )
+        raw_resp.raise_for_status()
+        raw_book = raw_resp.json()
+
+        min_order_size = int(raw_book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+
+        bids = sorted(raw_book.get("bids", []), key=lambda b: float(b["price"]), reverse=True)
+        if not bids:
+            log.info("  SELL: No bids on orderbook for %s, cannot exit", exit_signal.slug)
+            return None
+
+        best_bid = float(bids[0]["price"])
+
+        # Sell at best bid - 1 cent slippage for guaranteed fill
+        exec_price = round(max(best_bid - 0.01, 0.01), 2)
+
+        # Check bid liquidity
+        available_size = sum(
+            float(b["size"]) for b in bids if float(b["price"]) >= exec_price
+        )
+
+        size = float(exit_signal.shares)
+        if size < min_order_size:
+            size = float(min_order_size)
+
+        if available_size < size:
+            log.info(
+                "  SELL: Insufficient bid liquidity for %s: need %.0f, only %.0f available",
+                exit_signal.slug, size, available_size,
+            )
+            return None
+
+        pnl_per_share = exec_price - exit_signal.entry_price
+        total_pnl = pnl_per_share * size
+
+        log.info(
+            "  %s SELL %s (FOK): %.0f shares @ $%.2f (entry $%.2f, PnL $%+.2f) [%s]",
+            "DRY-RUN" if dry_run else "EARLY EXIT",
+            exit_signal.direction.upper(),
+            size,
+            exec_price,
+            exit_signal.entry_price,
+            total_pnl,
+            exit_signal.trigger,
+        )
+
+        if dry_run:
+            return {
+                "orderID": "dry-run-sell",
+                "status": "dry-run",
+                "exec_price": exec_price,
+                "size": size,
+                "filled": True,
+            }
+
+        order_args = OrderArgs(
+            price=exec_price, size=size, side=SELL, token_id=token_id
+        )
+
+        # Retry once on failure (sells are time-sensitive)
+        result = None
+        for attempt in range(2):
+            try:
+                signed = client.create_order(order_args)
+                result = client.post_order(signed, OrderType.FOK)
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    log.warning("  Sell attempt 1 failed: %s, retrying...", exc)
+                    time.sleep(2)
+                else:
+                    log.error("  Sell failed after 2 attempts: %s", exc)
+                    return None
+
+        if result is None:
+            return None
+
+        order_id = result.get("orderID", result.get("id", "unknown"))
+        status = result.get("status", "unknown")
+
+        if status == "MATCHED" or result.get("success"):
+            log.info("  SELL FILLED (FOK): %s  PnL: $%+.2f", order_id, total_pnl)
+            result["filled"] = True
+            result["exec_price"] = exec_price
+            result["pnl"] = total_pnl
+            return result
+        else:
+            log.warning("  SELL NOT FILLED (FOK): %s status=%s", order_id, status)
+            return None
+
+    except Exception as exc:
+        log.error("  Sell order failed: %s", exc)
+        return None
+
+
+def _mark_trade_early_exit(slug: str, sell_price: float, pnl: float, trigger: str) -> None:
+    """Mark a trade as early-exited in the trades file."""
+    trades = load_trades()
+    for t in trades:
+        if t.get("slug") == slug and t.get("resolved") is None and not t.get("early_exit"):
+            t["early_exit"] = True
+            t["early_exit_price"] = sell_price
+            t["early_exit_pnl"] = round(pnl, 4)
+            t["early_exit_trigger"] = trigger
+            t["early_exit_time"] = datetime.now(timezone.utc).isoformat()
+            t["resolved"] = datetime.now(timezone.utc).isoformat()
+            t["won"] = pnl > 0
+            t["pnl"] = round(pnl, 4)
+            break
+    tmp = TRADES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(trades, indent=2))
+    tmp.rename(TRADES_FILE)
+
+
+# ──────────────────────────────────────────────────────────────
 # Main loop
 # ──────────────────────────────────────────────────────────────
 
@@ -720,6 +867,13 @@ def main() -> None:
         SCAN_MAX_MINUTES,
         SCAN_INTERVAL_SEC,
     )
+    if EARLY_EXIT_ENABLED:
+        log.info(
+            "Early exit: ENABLED (stop-loss<$%.2f, reversal>%.2f%%)",
+            STOP_LOSS_THRESHOLD, MOMENTUM_REVERSAL_PCT,
+        )
+    else:
+        log.info("Early exit: disabled (hold-to-resolution)")
     log.info("=" * 60)
 
     # Restore state from previous runs (prevents double-trading after restart)
@@ -827,6 +981,40 @@ def main() -> None:
                     })
           except Exception as exc:
             log.warning("In-play scan error: %s", exc)
+
+        # ── Early exit check (every cycle if enabled) ─────────
+        if EARLY_EXIT_ENABLED and not shutdown_requested:
+            try:
+                trades = load_trades()
+                exit_signals = check_early_exits(
+                    trades=trades,
+                    clob_host=CLOB_HOST,
+                    stop_loss_threshold=STOP_LOSS_THRESHOLD,
+                    momentum_reversal_pct=MOMENTUM_REVERSAL_PCT,
+                    max_trade_usd=MAX_TRADE_USD,
+                )
+                for ex in exit_signals:
+                    if shutdown_requested:
+                        break
+                    log.info("  EARLY EXIT: %s", ex.reason)
+                    client = get_clob_client()
+                    sell_result = place_sell_order(client, ex, dry_run=dry_run)
+                    if sell_result and sell_result.get("filled"):
+                        sell_pnl = sell_result.get("pnl", 0.0)
+                        sell_exec = sell_result.get("exec_price", ex.current_price)
+                        _mark_trade_early_exit(
+                            slug=ex.slug,
+                            sell_price=sell_exec,
+                            pnl=sell_pnl,
+                            trigger=ex.trigger,
+                        )
+                        log.info(
+                            "  Early exit complete: %s sold @ $%.2f (PnL $%+.2f) [%s]",
+                            ex.slug, sell_exec, sell_pnl, ex.trigger,
+                        )
+                    time.sleep(RATE_LIMIT_SEC)
+            except Exception as exc:
+                log.warning("Early exit check failed: %s", exc)
 
         # ── Resolution check (every 5 cycles) ────────────────
         if cycle_count % 5 == 0:

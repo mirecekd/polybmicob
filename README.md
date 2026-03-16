@@ -85,6 +85,7 @@ polybmicob/
 |   |-- price_feed.py          # Binance BTC price + momentum + Fear & Greed Index
 |   |-- btc_market_scanner.py  # Gamma API scanner for btc-updown-5m-* markets
 |   |-- signal_engine.py       # Weighted signal fusion engine (3 sources)
+|   |-- early_exit.py          # Early exit module (stop-loss + momentum reversal sell)
 |   |-- claim_winnings.py      # Auto-claim resolved winnings via gasless relayer
 |-- scripts/
 |   |-- btc_bot.py             # Main bot loop (scan -> signal -> trade -> wait)
@@ -135,14 +136,39 @@ No LLM, no search APIs, no paid services. Purely algorithmic.
 | Min edge threshold | 10% | Only trade with clear advantage |
 | Time window | 1-6 minutes to start | Not too early (stale), not too late (can't fill) |
 
-### Hold-to-Resolution Strategy
+### Hold-to-Resolution Strategy (Default)
 
-For 5-minute markets, there is no stop-loss or take-profit:
+By default, positions are held until market resolution:
 
-- Markets resolve in 5 minutes - too fast for active management
-- Selling early incurs bid-ask spread costs twice
+- Markets resolve in 5 minutes - too fast for active profit-taking
+- With 84% win rate, selling early on winners loses more profit than it saves
 - Binary outcome: win $1.00 per share or lose entry price
 - Maximum loss per trade = entry price ($1.00 max)
+
+### Early Exit (Optional)
+
+When enabled (`EARLY_EXIT_ENABLED=true`), the bot monitors open positions every cycle and sells early to **cut losses** on losing trades. This does NOT affect winning trades.
+
+Two triggers:
+
+| Trigger | Condition | Action |
+|---------|-----------|--------|
+| **Stop-loss** | Token price drops below $0.30 | Sell immediately (lose ~$0.20 instead of ~$0.50) |
+| **Momentum reversal** | BTC reverses >0.15% against position while still in profit | Lock in profit via sell |
+
+**Why only loss-cutting, not profit-taking?** Historical analysis on 57 trades showed:
+- Profit-taking at 75c would have **halved** total winnings ($12 instead of $24)
+- Stop-loss alone would have **saved ~$3** on 9 losing trades
+- Net improvement: ~15% better P&L with stop-loss only
+
+```bash
+# Enable in .env
+EARLY_EXIT_ENABLED=true       # false = hold-to-resolution (default)
+STOP_LOSS_THRESHOLD=0.30      # Sell if token drops below 30c
+MOMENTUM_REVERSAL_PCT=0.15    # Sell if BTC reverses >0.15%
+```
+
+Early-exited trades are marked in `btc_trades.json` with `early_exit: true`, `early_exit_trigger`, `early_exit_price`, and `early_exit_pnl` fields.
 
 ---
 
