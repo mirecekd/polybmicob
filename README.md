@@ -316,7 +316,7 @@ A built-in web dashboard shows live trade statistics. It runs automatically alon
 - **Hero cards:** Wallet USDC (on-chain balance), Today P&L, All-Time P&L, Win Rate, Streak
 - **Stats row 1:** Total Trades, UP/DOWN Win Rates, Avg Confidence, Avg Edge
 - **Stats row 2 (today):** Cycles, Mom. Skips, Pre/In-Play Signals, Filled, Rejected, Resolved
-- **SVG charts:** Cumulative P&L line chart + Trade dots (WIN/LOSS by entry price)
+- **SVG charts (fullwidth):** Cumulative P&L, Entry price dots (WIN/LOSS), BTC price trend with directional trade markers
 - **Recent Trades:** Last 50 trades with mode (PRE/IN-PLAY), direction, edge, result, P&L
 - **In-Play Signal Analysis:** Every in-play signal with outcome tracking
 - **Hourly Breakdown:** Per-hour cycles, momentum skips, signals, filled/rejected orders
