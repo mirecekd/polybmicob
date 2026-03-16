@@ -314,9 +314,52 @@ def render_charts(trades: list[dict]) -> str:
       <text x="{w/2}" y="{h2 - 3}" fill="#6e7681" font-size="10" text-anchor="middle">Entry price: <tspan fill="#3fb950">WIN</tspan> / <tspan fill="#f85149">LOSS</tspan> (last {len(recent)} trades)</text>
     </svg>"""
 
+    # ── Chart 3: BTC price trend with trade markers ──────────
+    h3 = 140
+    btc_prices = [t.get("btc_price", 0) for t in recent]
+    min_btc = min(btc_prices) - 50
+    max_btc = max(btc_prices) + 50
+    btc_range = max(max_btc - min_btc, 1)
+
+    def btc_x(i):
+        return pad_l + (i / max(len(recent) - 1, 1)) * chart_w
+
+    def btc_y(price):
+        return pad_t + (h3 - pad_t - pad_b) - ((price - min_btc) / btc_range) * (h3 - pad_t - pad_b)
+
+    # BTC price line
+    btc_line = " ".join(f"{btc_x(i):.1f},{btc_y(p):.1f}" for i, p in enumerate(btc_prices))
+
+    # Trade markers on the line
+    btc_markers = ""
+    for i, t in enumerate(recent):
+        x = btc_x(i)
+        y = btc_y(t.get("btc_price", 0))
+        won = t.get("won", False)
+        direction = t.get("direction", "")
+        color = "#3fb950" if won else "#f85149"
+        # Arrow up or down based on bet direction
+        if direction == "up":
+            btc_markers += f'<polygon points="{x:.1f},{y-6:.1f} {x-4:.1f},{y+2:.1f} {x+4:.1f},{y+2:.1f}" fill="{color}" opacity="0.9"/>'
+        else:
+            btc_markers += f'<polygon points="{x:.1f},{y+6:.1f} {x-4:.1f},{y-2:.1f} {x+4:.1f},{y-2:.1f}" fill="{color}" opacity="0.9"/>'
+
+    # BTC trend direction
+    btc_trend_color = "#3fb950" if btc_prices[-1] >= btc_prices[0] else "#f85149"
+
+    btc_svg = f"""<svg viewBox="0 0 {w} {h3}" style="width:100%;max-width:{w}px;height:auto;">
+      <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h3-pad_t-pad_b}" fill="#0d1117" rx="4"/>
+      <polyline points="{btc_line}" fill="none" stroke="#8b949e" stroke-width="1.5" opacity="0.6"/>
+      {btc_markers}
+      <text x="{pad_l - 5}" y="{btc_y(max_btc):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${max_btc:,.0f}</text>
+      <text x="{pad_l - 5}" y="{btc_y(min_btc):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${min_btc:,.0f}</text>
+      <text x="{w/2}" y="{h3 - 3}" fill="#6e7681" font-size="10" text-anchor="middle">BTC price trend: <tspan fill="#3fb950">UP bet WIN</tspan> / <tspan fill="#f85149">DOWN bet LOSS</tspan> (last {len(recent)} trades)</text>
+    </svg>"""
+
     return f"""<div style="display:flex;flex-direction:column;gap:12px;padding:16px;">
       {pnl_svg}
       {dots_svg}
+      {btc_svg}
     </div>"""
 
 
