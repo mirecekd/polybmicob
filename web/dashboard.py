@@ -241,7 +241,7 @@ def render_charts(trades: list[dict]) -> str:
     recent = resolved[-50:]
 
     # ── Chart 1: Cumulative P&L ──────────────────────────────
-    w, h = 700, 160
+    w, h = 1100, 160
     pad_l, pad_r, pad_t, pad_b = 50, 20, 15, 25
 
     cumulative = []
@@ -275,7 +275,7 @@ def render_charts(trades: list[dict]) -> str:
 
     final_color = "#3fb950" if cumulative[-1] >= 0 else "#f85149"
 
-    pnl_svg = f"""<svg viewBox="0 0 {w} {h}" style="width:100%;max-width:{w}px;height:auto;">
+    pnl_svg = f"""<svg viewBox="0 0 {w} {h}" style="width:100%;height:auto;">
       <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{chart_h}" fill="#0d1117" rx="4"/>
       {'<line x1="' + str(pad_l) + '" y1="' + f"{zero_y:.1f}" + '" x2="' + str(w-pad_r) + '" y2="' + f"{zero_y:.1f}" + '" stroke="#30363d" stroke-dasharray="4,4"/>' if zero_y else ''}
       <polygon points="{fill_points}" fill="{final_color}" opacity="0.1"/>
@@ -306,7 +306,7 @@ def render_charts(trades: list[dict]) -> str:
         color = "#3fb950" if won else "#f85149"
         dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}" opacity="0.8"/>'
 
-    dots_svg = f"""<svg viewBox="0 0 {w} {h2}" style="width:100%;max-width:{w}px;height:auto;">
+    dots_svg = f"""<svg viewBox="0 0 {w} {h2}" style="width:100%;height:auto;">
       <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h2-pad_t-pad_b}" fill="#0d1117" rx="4"/>
       <text x="{pad_l - 5}" y="{dot_y(max_price):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${max_price:.2f}</text>
       <text x="{pad_l - 5}" y="{dot_y(min_price):.1f}" fill="#8b949e" font-size="10" text-anchor="end" dominant-baseline="middle">${min_price:.2f}</text>
@@ -347,7 +347,7 @@ def render_charts(trades: list[dict]) -> str:
     # BTC trend direction
     btc_trend_color = "#3fb950" if btc_prices[-1] >= btc_prices[0] else "#f85149"
 
-    btc_svg = f"""<svg viewBox="0 0 {w} {h3}" style="width:100%;max-width:{w}px;height:auto;">
+    btc_svg = f"""<svg viewBox="0 0 {w} {h3}" style="width:100%;height:auto;">
       <rect x="{pad_l}" y="{pad_t}" width="{chart_w}" height="{h3-pad_t-pad_b}" fill="#0d1117" rx="4"/>
       <polyline points="{btc_line}" fill="none" stroke="#8b949e" stroke-width="1.5" opacity="0.6"/>
       {btc_markers}
