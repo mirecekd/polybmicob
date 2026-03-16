@@ -977,6 +977,14 @@ def main() -> None:
                     market_slug=ip_signal.slug,
                 )
 
+                # Check daily loss limit before in-play trades too
+                if daily_loss_usd >= MAX_DAILY_LOSS_USD:
+                    log.warning(
+                        "Daily loss limit reached ($%.2f >= $%.2f). Skipping in-play.",
+                        daily_loss_usd, MAX_DAILY_LOSS_USD,
+                    )
+                    break
+
                 client = get_clob_client()
 
                 # Add slug to traded_slugs BEFORE placing order to prevent
