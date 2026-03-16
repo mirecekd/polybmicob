@@ -13,6 +13,7 @@ venv/
 
 # Runtime data
 data/btc_bot.log
+data/btc_bot.log.*
 data/btc_trades.json
 data/claim_winnings.log
 data/*.tmp
@@ -33,3 +34,4 @@ SPEC.md
 .DS_Store
 Thumbs.db
 data/claim_winnings.log
+data/dashboard_stats.json

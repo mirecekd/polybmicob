@@ -20,6 +20,7 @@ Usage:
 
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -47,6 +48,16 @@ from lib.signal_engine import (
     TradeSignal,
     compute_orderbook_imbalance,
     generate_signal,
+)
+from lib.stats_collector import (
+    record_cycle,
+    record_momentum_skip,
+    record_no_signal,
+    record_pre_signal,
+    record_inplay_signal,
+    record_order_filled,
+    record_order_rejected,
+    record_resolution,
 )
 
 # Load .env from project root
@@ -120,14 +131,22 @@ LOG_FILE = DATA_DIR / "btc_bot.log"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# RotatingFileHandler: 2 MB per file, keep 5 backups (btc_bot.log.1 .. .5)
+_log_formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+_file_handler = logging.handlers.RotatingFileHandler(
+    LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5,
+)
+_file_handler.setFormatter(_log_formatter)
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(),
-    ],
+    handlers=[_file_handler, _stream_handler],
 )
 log = logging.getLogger("polybmicob")
 
@@ -359,6 +378,7 @@ def place_trade(
 
         if not asks:
             log.info("  No asks on orderbook, skipping (no liquidity)")
+            record_order_rejected("no_asks", "Empty orderbook")
             return None
 
         best_ask = float(asks[0]["price"])
@@ -385,6 +405,7 @@ def place_trade(
                 "  Insufficient liquidity: need %.0f shares, only %.0f available @ $%.2f",
                 size, available_size, exec_price,
             )
+            record_order_rejected("low_liq", f"need {size:.0f}, only {available_size:.0f}")
             return None
 
         log.info(
@@ -434,14 +455,17 @@ def place_trade(
 
         if status == "MATCHED" or result.get("success"):
             log.info("  ORDER FILLED (FOK): %s", order_id)
+            record_order_filled()
             result["filled"] = True
             return result
         else:
             log.warning("  ORDER NOT FILLED (FOK): %s status=%s", order_id, status)
+            record_order_rejected("not_filled", f"FOK status={status}")
             return None
 
     except Exception as exc:
         log.error("  Trade failed: %s", exc)
+        record_order_rejected("error", str(exc)[:80])
         return None
 
 
@@ -476,6 +500,7 @@ def run_cycle(dry_run: bool = False) -> None:
     try:
         markets = scan_btc_5m_markets(SCAN_MIN_MINUTES, SCAN_MAX_MINUTES)
         log.info("Found %d upcoming BTC 5m markets", len(markets))
+        record_cycle()
     except Exception as exc:
         log.error("Scanner failed: %s", exc)
         return
@@ -499,6 +524,7 @@ def run_cycle(dry_run: bool = False) -> None:
     # ── 2b. Momentum threshold filter ────────────────────────
     if abs(snapshot.momentum_5m) < MIN_MOMENTUM_PCT:
         log.info("  Momentum %.3f%% < %.2f%% threshold, skipping pre-market.", snapshot.momentum_5m, MIN_MOMENTUM_PCT)
+        record_momentum_skip()
         return
 
     # ── 3. Get sentiment (non-critical) ──────────────────────
@@ -625,6 +651,7 @@ def run_cycle(dry_run: bool = False) -> None:
             sig.edge * 100,
             sig.confidence * 100,
         )
+        record_pre_signal()
         log.info(
             "    Buy %s @ $%.2f (%.0f shares) -> WIN $%.2f / LOSE $%.2f  (EV: $%+.2f)",
             sig.direction.upper(),
@@ -751,6 +778,13 @@ def main() -> None:
                     ip_signal.btc_move_pct,
                     ip_signal.elapsed_sec,
                 )
+                record_inplay_signal(
+                    direction=ip_signal.direction,
+                    market=ip_signal.slug,
+                    edge=f"{ip_signal.edge*100:.1f}%",
+                    btc_move=f"{ip_signal.btc_move_pct:+.3f}%",
+                    elapsed=f"{ip_signal.elapsed_sec}s elapsed",
+                )
 
                 # Create a TradeSignal-compatible object for place_trade
                 ip_trade_signal = TradeSignal(
@@ -794,6 +828,7 @@ def main() -> None:
                 newly = resolve_trades(TRADES_FILE, rate_limit_sec=RATE_LIMIT_SEC)
                 if newly > 0:
                     log.info("--- Resolved %d trade(s) ---", newly)
+                    record_resolution(newly)
             except Exception as exc:
                 log.debug("Resolution check failed: %s", exc)
 

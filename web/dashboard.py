@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.resolution_tracker import compute_resolution_stats
+from lib.stats_collector import load_today_stats
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 TRADES_FILE = DATA_DIR / "btc_trades.json"
@@ -323,7 +324,7 @@ def render_html() -> str:
     trades = load_trades()
     stats = compute_stats(trades)
     log_tail = get_log_tail(40)
-    activity = parse_today_activity()
+    activity = load_today_stats()
 
     # Streak display
     streak = stats["streak"]
@@ -578,7 +579,7 @@ def render_html() -> str:
 </details>
 
 <details>
-  <summary>In-Play Signal Analysis ({len(activity['inplay_events'])} signals, {sum(1 for e in activity['inplay_events'] if e['outcome'] == 'filled')} filled, {sum(1 for e in activity['inplay_events'] if e['outcome'] not in ('filled', 'unknown'))} rejected)</summary>
+  <summary>In-Play Signal Analysis ({len(activity['inplay_events'])} signals, {sum(1 for e in activity['inplay_events'] if e['outcome'] == 'filled')} filled, {sum(1 for e in activity['inplay_events'] if e['outcome'] not in ('filled', 'unknown', 'pending'))} rejected)</summary>
   <div class="expand-content" style="padding:16px;">
     <div style="font-size:12px; color:#8b949e; margin-bottom:12px;">
       {''.join(f'<span style="display:inline-block;background:#21262d;border-radius:4px;padding:4px 10px;margin:0 6px 6px 0;font-size:11px;"><span style="color:#c9d1d9">{r}</span> <span style="color:#f85149;font-weight:700">{activity["fail_reasons"].count(r)}</span></span>' for r in sorted(set(activity['fail_reasons'])))}
@@ -595,7 +596,7 @@ def render_html() -> str:
       <td>{e['edge']}</td>
       <td>{e['btc_move']}</td>
       <td class="muted">{e['elapsed']}</td>
-      <td style="color:{'#3fb950' if e['outcome'] == 'filled' else '#f85149' if e['outcome'] not in ('unknown',) else '#8b949e'};font-weight:600">{e['outcome']}</td>
+      <td style="color:{'#3fb950' if e['outcome'] == 'filled' else '#f85149' if e['outcome'] not in ('unknown', 'pending') else '#8b949e'};font-weight:600">{e['outcome']}</td>
       <td class="muted">{e.get('detail', '')}</td>
     </tr>""" for e in reversed(activity['inplay_events'])) if activity['inplay_events'] else '<tr><td colspan="8" class="muted" style="text-align:center;padding:20px;">No in-play signals today</td></tr>'}
     </tbody>
