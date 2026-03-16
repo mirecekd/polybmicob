@@ -154,6 +154,14 @@ def check_early_exits(
             log.debug("  Early exit %s: no bids, skipping", slug)
             continue
 
+        # Skip near-zero or near-one prices (market likely already resolved)
+        if current_price < 0.05 or current_price > 0.95:
+            log.debug(
+                "  Early exit %s: price $%.2f near 0/1 (likely resolved), skipping",
+                slug, current_price,
+            )
+            continue
+
         # Estimate shares held
         shares = max(int(round(max_trade_usd / entry_price)), 1)
 

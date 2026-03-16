@@ -572,6 +572,13 @@ def place_sell_order(
                 result = client.post_order(signed, OrderType.FOK)
                 break
             except Exception as exc:
+                err_str = str(exc).lower()
+                if "balance" in err_str or "allowance" in err_str:
+                    log.info(
+                        "  Sell %s: no balance/allowance (tokens likely already resolved)",
+                        exit_signal.slug,
+                    )
+                    return {"no_balance": True}
                 if attempt == 0:
                     log.warning("  Sell attempt 1 failed: %s, retrying...", exc)
                     time.sleep(2)
@@ -1011,6 +1018,12 @@ def main() -> None:
                         log.info(
                             "  Early exit complete: %s sold @ $%.2f (PnL $%+.2f) [%s]",
                             ex.slug, sell_exec, sell_pnl, ex.trigger,
+                        )
+                    elif sell_result and sell_result.get("no_balance"):
+                        # Tokens already redeemed/resolved - skip future checks
+                        log.info(
+                            "  Early exit %s: no balance (market likely resolved), skipping",
+                            ex.slug,
                         )
                     time.sleep(RATE_LIMIT_SEC)
             except Exception as exc:
