@@ -840,11 +840,14 @@ def run_cycle(dry_run: bool = False) -> None:
             )
             return
 
+        # Add slug to traded_slugs BEFORE placing order to prevent
+        # duplicate orders from concurrent cycles during retry delays
+        traded_slugs.add(mkt.slug)
+
         result = place_trade(client, sig, MAX_TRADE_USD, dry_run=dry_run)
 
         if result is not None:
             order_id = result.get("orderID", result.get("id", "unknown"))
-            traded_slugs.add(mkt.slug)
 
             # Log trade
             trade_record = {
@@ -975,11 +978,15 @@ def main() -> None:
                 )
 
                 client = get_clob_client()
+
+                # Add slug to traded_slugs BEFORE placing order to prevent
+                # duplicate orders from concurrent cycles during retry delays
+                traded_slugs.add(ip_signal.slug)
+
                 result = place_trade(client, ip_trade_signal, MAX_TRADE_USD, dry_run=dry_run)
 
                 if result is not None:
                     order_id = result.get("orderID", result.get("id", "unknown"))
-                    traded_slugs.add(ip_signal.slug)
                     save_trade({
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "slug": ip_signal.slug,
