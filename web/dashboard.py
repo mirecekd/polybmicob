@@ -411,6 +411,33 @@ def render_html() -> str:
     now_et_str = now_et.strftime("%H:%M ET")
     log_escaped = log_tail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    # Market session indicator based on UTC hour
+    h = now_utc.hour
+    if 0 <= h < 3:
+        session_name = "Asia Session (Tokyo)"
+        session_color = "#d29922"
+    elif 3 <= h < 7:
+        session_name = "Dead Zone - Low Volatility"
+        session_color = "#8b949e"
+    elif 7 <= h < 8:
+        session_name = "Asia/Europe Overlap"
+        session_color = "#d29922"
+    elif 8 <= h < 12:
+        session_name = "EU Session"
+        session_color = "#58a6ff"
+    elif 12 <= h < 14:
+        session_name = "US Pre-Market"
+        session_color = "#d29922"
+    elif 14 <= h < 21:
+        session_name = "US Session - Peak Volatility"
+        session_color = "#3fb950"
+    elif 21 <= h < 23:
+        session_name = "US Close / After-Hours"
+        session_color = "#d29922"
+    else:
+        session_name = "Late Night - Low Activity"
+        session_color = "#8b949e"
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -475,7 +502,8 @@ def render_html() -> str:
 <body>
 
 <h1>PolyBMiCoB</h1>
-<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str}</p>
+<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str}<br>
+<span style="color:{session_color};font-weight:600">{session_name}</span></p>
 
 <div class="hero">
   <div class="hero-card">
