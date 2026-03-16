@@ -734,9 +734,12 @@ def main() -> None:
         except Exception as exc:
             log.error("Cycle error: %s", exc, exc_info=True)
 
-        # ── In-play scan (every cycle) ───────────────────────
+        # ── In-play scan (every cycle, respects trading hours) ──
+        current_hour = datetime.now(timezone.utc).hour
         if not IN_PLAY_ENABLED:
             pass
+        elif TRADING_HOURS is not None and current_hour not in TRADING_HOURS:
+            pass  # quiet hour - skip in-play too
         else:
           try:
             in_play_markets = scan_in_play_markets(
