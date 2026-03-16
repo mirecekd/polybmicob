@@ -431,8 +431,10 @@ def place_trade(
             price=exec_price, size=size, side=BUY, token_id=token_id
         )
 
-        # Retry with backoff on API errors (re-sign each attempt to avoid "Duplicated" rejection)
-        max_retries = 2
+        # Retry with exponential backoff on API errors
+        # Re-sign each attempt to avoid "Duplicated" rejection
+        max_retries = 4
+        backoff_schedule = [2, 5, 10, 15]  # seconds between retries
         result = None
         for attempt in range(max_retries + 1):
             try:
@@ -441,8 +443,8 @@ def place_trade(
                 break
             except Exception as post_exc:
                 if attempt < max_retries:
-                    wait = RATE_LIMIT_SEC * (attempt + 1)
-                    log.warning("  Order attempt %d/%d failed: %s, retrying in %.1fs...",
+                    wait = backoff_schedule[attempt] if attempt < len(backoff_schedule) else 15
+                    log.warning("  Order attempt %d/%d failed: %s, retrying in %.0fs...",
                                 attempt + 1, max_retries + 1, post_exc, wait)
                     time.sleep(wait)
                 else:
