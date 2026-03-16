@@ -58,6 +58,7 @@ from lib.stats_collector import (
     record_order_filled,
     record_order_rejected,
     record_resolution,
+    record_wallet_balance,
 )
 
 # Load .env from project root
@@ -852,6 +853,29 @@ def main() -> None:
                 )
             except Exception as exc:
                 log.warning("Auto-claim failed (non-fatal): %s", exc)
+
+            # ── Wallet balance check (same cadence as claim) ──
+            try:
+                # USDC.e on Polygon: balanceOf(proxy_wallet)
+                usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+                addr_padded = FUNDER[2:].lower().zfill(64)
+                call_data = f"0x70a08231{addr_padded}"
+                resp = httpx.post(
+                    RPC_URL,
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "eth_call",
+                        "params": [{"to": usdc_contract, "data": call_data}, "latest"],
+                        "id": 1,
+                    },
+                    timeout=10,
+                )
+                hex_balance = resp.json().get("result", "0x0")
+                usdc_balance = int(hex_balance, 16) / 1e6
+                record_wallet_balance(usdc_balance)
+                log.info("Wallet balance: $%.2f USDC", usdc_balance)
+            except Exception as exc:
+                log.debug("Wallet balance check failed: %s", exc)
 
         if shutdown_requested:
             break

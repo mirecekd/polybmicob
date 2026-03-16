@@ -211,6 +211,16 @@ def _resolve_last_inplay(dd: dict, outcome: str, detail: str) -> None:
             return
 
 
+def record_wallet_balance(usdc_balance: float) -> None:
+    """Record current wallet USDC balance (not date-keyed, always latest)."""
+    data = _load()
+    data["_wallet"] = {
+        "usdc_balance": round(usdc_balance, 2),
+        "updated_at": _now_ts(),
+    }
+    _save(data)
+
+
 # ──────────────────────────────────────────────────────────────
 # Read API - called from dashboard
 # ──────────────────────────────────────────────────────────────
@@ -243,3 +253,9 @@ def load_today_stats() -> dict:
     dd = data[day]
     dd["today"] = day
     return dd
+
+
+def load_wallet_balance() -> dict:
+    """Load wallet balance for the dashboard. Returns {usdc_balance, updated_at}."""
+    data = _load()
+    return data.get("_wallet", {"usdc_balance": 0.0, "updated_at": None})

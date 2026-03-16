@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.resolution_tracker import compute_resolution_stats
-from lib.stats_collector import load_today_stats
+from lib.stats_collector import load_today_stats, load_wallet_balance
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 TRADES_FILE = DATA_DIR / "btc_trades.json"
@@ -325,6 +325,7 @@ def render_html() -> str:
     stats = compute_stats(trades)
     log_tail = get_log_tail(40)
     activity = load_today_stats()
+    wallet = load_wallet_balance()
 
     # Streak display
     streak = stats["streak"]
@@ -464,6 +465,11 @@ def render_html() -> str:
 <p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str}</p>
 
 <div class="hero">
+  <div class="hero-card">
+    <div class="num" style="color:#d29922">${wallet['usdc_balance']:.2f}</div>
+    <div class="lbl">Wallet USDC</div>
+    <div class="detail">{'updated ' + wallet['updated_at'][11:16] + ' UTC' if wallet['updated_at'] else 'waiting for first check'}</div>
+  </div>
   <div class="hero-card">
     <div class="num" style="color:{pnl_color}">${stats['total_pnl']:+.2f}</div>
     <div class="lbl">Real P&L</div>
