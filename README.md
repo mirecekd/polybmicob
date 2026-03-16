@@ -368,9 +368,33 @@ python web/dashboard.py                 # default port 8005
 python web/dashboard.py --port 3000     # custom port
 ```
 
+### Security Warning
+
+> **Do NOT expose the dashboard to the internet without authentication!**
+>
+> The dashboard and its API endpoints have **no built-in authentication**. Anyone with access can see:
+> - Your **wallet USDC balance** (real on-chain balance)
+> - Your **complete trade history** (entry prices, directions, P&L)
+> - Your **trading performance** (win rate, streak, daily/all-time P&L)
+> - Your **bot logs** (timing, errors, market analysis details)
+>
+> This information can be used to:
+> - **Estimate your wallet size** and trading patterns
+> - **Front-run your trades** by knowing your exact strategy timing
+> - **Copy or counter-trade** your positions
+>
+> **Recommended setup:** Put the dashboard behind a reverse proxy (nginx, Caddy, Traefik) with at least HTTP Basic Auth or OAuth. Example nginx config:
+> ```nginx
+> location / {
+>     auth_basic "PolyBMiCoB";
+>     auth_basic_user_file /etc/nginx/.htpasswd;
+>     proxy_pass http://127.0.0.1:8005;
+> }
+> ```
+
 ### API Endpoints
 
-The dashboard also exposes JSON APIs:
+The dashboard also exposes JSON APIs (protected by the same auth as the dashboard):
 
 | Endpoint | Returns |
 |----------|---------|
