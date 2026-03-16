@@ -448,6 +448,16 @@ def place_trade(
                 result = client.post_order(signed, OrderType.FOK)
                 break
             except Exception as post_exc:
+                err_msg = str(post_exc).lower()
+                # Don't retry FOK kills (price moved) or balance errors - only network errors
+                if "fully filled" in err_msg or "killed" in err_msg:
+                    log.info("  FOK order killed (price moved / no liquidity), not retrying")
+                    record_order_rejected("fok_killed", "Price moved during retry")
+                    return None
+                if "balance" in err_msg or "allowance" in err_msg:
+                    log.warning("  Insufficient balance/allowance, not retrying")
+                    record_order_rejected("no_balance", "Insufficient balance")
+                    return None
                 if attempt < max_retries:
                     wait = backoff_schedule[attempt] if attempt < len(backoff_schedule) else 15
                     log.warning("  Order attempt %d/%d failed: %s, retrying in %.0fs...",
