@@ -426,7 +426,7 @@ def render_html() -> str:
   .sub {{ color:#8b949e; font-size:13px; margin-bottom:24px; }}
 
   /* Hero cards */
-  .hero {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr));
+  .hero {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
            gap:16px; margin-bottom:28px; }}
   .hero-card {{ background:#161b22; border:1px solid #30363d; border-radius:12px;
                 padding:24px; text-align:center; }}
@@ -503,15 +503,28 @@ def render_html() -> str:
     <div class="lbl">Streak</div>
     <div class="detail">{stats['unresolved']} pending</div>
   </div>
-  <div class="hero-card">
-    <div class="num" style="color:#58a6ff">{stats['live_trades']}</div>
+</div>
+
+<div class="stats-row">
+  <div class="stat">
+    <div class="val" style="color:#58a6ff">{stats['live_trades']}</div>
     <div class="lbl">Total Trades</div>
-    <div class="detail">{stats['avg_edge']:.1%} avg edge</div>
   </div>
-  <div class="hero-card">
-    <div class="num" style="color:#58a6ff">{stats['avg_confidence']:.0%}</div>
+  <div class="stat">
+    <div class="val">{up_wr}</div>
+    <div class="lbl">UP Win Rate</div>
+  </div>
+  <div class="stat">
+    <div class="val">{down_wr}</div>
+    <div class="lbl">DOWN Win Rate</div>
+  </div>
+  <div class="stat">
+    <div class="val">{stats['avg_confidence']:.0%}</div>
     <div class="lbl">Avg Confidence</div>
-    <div class="detail">{up_wr} UP / {down_wr} DN</div>
+  </div>
+  <div class="stat">
+    <div class="val">{stats['avg_edge']:.1%}</div>
+    <div class="lbl">Avg Edge</div>
   </div>
 </div>
 
