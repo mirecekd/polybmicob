@@ -888,6 +888,12 @@ def _check_late_hedge(
             _mark_trade_hedged(slug, opposite_token_id, opp_exec_price, opp_size, pair_cost)
             continue
 
+        # Check if we already hold the opposite token (ghost order prevention)
+        if _check_position_exists(opposite_token_id):
+            log.info("  HEDGE: already hold opposite token for %s, skipping", slug)
+            _mark_trade_hedged(slug, opposite_token_id, opp_exec_price, opp_size, pair_cost)
+            continue
+
         try:
             order_args = OrderArgs(
                 price=opp_exec_price, size=opp_size, side=BUY, token_id=opposite_token_id,
@@ -905,7 +911,11 @@ def _check_late_hedge(
             else:
                 log.info("  HEDGE NOT FILLED: %s status=%s", order_id, status)
         except Exception as exc:
-            log.warning("  HEDGE failed for %s: %s", slug, exc)
+            err_msg = str(exc).lower()
+            if "fully filled" in err_msg or "killed" in err_msg:
+                log.info("  HEDGE FOK killed for %s (price moved)", slug)
+            else:
+                log.warning("  HEDGE failed for %s: %s", slug, exc)
 
 
 def _mark_trade_hedged(slug: str, opp_token_id: str, opp_price: float, opp_shares: int, pair_cost: float) -> None:
