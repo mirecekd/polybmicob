@@ -178,10 +178,11 @@ def resolve_trades(
         else:
             won = our_direction.lower() == winner_outcome.lower()
 
-        entry_price = trade.get("entry_price", 0.5)
+        # Use exec_price (actual buy price) for PnL, fallback to entry_price
+        buy_price = trade.get("exec_price") or trade.get("entry_price", 0.5)
         # Use actual shares if recorded, otherwise estimate from MIN_ORDER_SIZE=5
         shares = trade.get("shares", 5)
-        pnl = ((1.0 - entry_price) * shares) if won else (-entry_price * shares)
+        pnl = ((1.0 - buy_price) * shares) if won else (-buy_price * shares)
 
         trade["resolved"] = True
         trade["won"] = won
@@ -192,11 +193,12 @@ def resolve_trades(
         changed = True
 
         log.info(
-            "  %s: %s (bet %s @ $%.2f -> %s $%+.2f)",
+            "  %s: %s (bet %s @ $%.2f x%d -> %s $%+.2f)",
             slug,
             "WIN" if won else "LOSS",
             our_direction.upper(),
-            entry_price,
+            buy_price,
+            shares,
             winner_outcome.upper(),
             pnl,
         )
