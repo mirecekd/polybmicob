@@ -476,6 +476,8 @@ def place_trade(
             log.info("  ORDER FILLED (FOK): %s", order_id)
             record_order_filled()
             result["filled"] = True
+            result["size"] = size
+            result["exec_price"] = exec_price
             return result
         else:
             log.warning("  ORDER NOT FILLED (FOK): %s status=%s", order_id, status)
@@ -856,6 +858,8 @@ def run_cycle(dry_run: bool = False) -> None:
                 "direction": sig.direction,
                 "token_id": sig.token_id,
                 "entry_price": sig.entry_price,
+                "shares": int(result.get("size", 5)),
+                "exec_price": result.get("exec_price", sig.entry_price),
                 "edge": round(sig.edge, 4),
                 "confidence": round(sig.confidence, 4),
                 "reason": sig.reason,
@@ -1007,6 +1011,8 @@ def main() -> None:
                         "direction": ip_signal.direction,
                         "token_id": ip_signal.token_id,
                         "entry_price": ip_signal.entry_price,
+                        "shares": int(result.get("size", 5)),
+                        "exec_price": result.get("exec_price", ip_signal.entry_price),
                         "edge": round(ip_signal.edge, 4),
                         "confidence": round(ip_signal.confidence, 4),
                         "reason": ip_signal.reason,

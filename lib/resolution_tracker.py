@@ -179,7 +179,9 @@ def resolve_trades(
             won = our_direction.lower() == winner_outcome.lower()
 
         entry_price = trade.get("entry_price", 0.5)
-        pnl = (1.0 - entry_price) if won else (-entry_price)
+        # Use actual shares if recorded, otherwise estimate from MIN_ORDER_SIZE=5
+        shares = trade.get("shares", 5)
+        pnl = ((1.0 - entry_price) * shares) if won else (-entry_price * shares)
 
         trade["resolved"] = True
         trade["won"] = won
