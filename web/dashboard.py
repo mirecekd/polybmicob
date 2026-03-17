@@ -25,6 +25,14 @@ TRADES_FILE = DATA_DIR / "btc_trades.json"
 LOG_FILE = DATA_DIR / "btc_bot.log"
 PORT = int(os.environ.get("DASHBOARD_PORT", "8005"))
 
+# Hour-of-day trading filter (same logic as btc_bot.py)
+_TRADING_HOURS_STR = os.environ.get("TRADING_HOURS_UTC", "")
+TRADING_HOURS: set[int] | None = (
+    {int(h.strip()) for h in _TRADING_HOURS_STR.split(",") if h.strip()}
+    if _TRADING_HOURS_STR.strip()
+    else None
+)
+
 
 def load_trades() -> list[dict]:
     if not TRADES_FILE.exists():
@@ -571,6 +579,11 @@ def render_html() -> str:
     now_et_str = now_et.strftime("%H:%M ET")
     log_escaped = log_tail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    # NOTRADING indicator: show when current hour is outside TRADING_HOURS_UTC
+    notrading_suffix = ""
+    if TRADING_HOURS is not None and now_utc.hour not in TRADING_HOURS:
+        notrading_suffix = ' / <span style="color:#f85149;font-weight:700">NOTRADING</span>'
+
     # Market session indicator based on UTC hour
     h = now_utc.hour
     if 0 <= h < 3:
@@ -662,7 +675,7 @@ def render_html() -> str:
 <body>
 
 <h1>PolyBMiCoB</h1>
-<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str} / <span style="color:{session_color};font-weight:600">{session_name}</span></p>
+<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str} / <span style="color:{session_color};font-weight:600">{session_name}</span>{notrading_suffix}</p>
 
 <div class="hero">
   <div class="hero-card">
