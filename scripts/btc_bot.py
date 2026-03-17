@@ -718,6 +718,214 @@ def _mark_trade_early_exit(slug: str, sell_price: float, pnl: float, trigger: st
 
 
 # ──────────────────────────────────────────────────────────────
+# Late-game hedge: buy opposite side cheap near market end
+# ──────────────────────────────────────────────────────────────
+
+# Maximum price for hedge (opposite side). At $0.35: pair cost = entry + 0.35
+HEDGE_MAX_PRICE = float(os.environ.get("HEDGE_MAX_PRICE", "0.35"))
+# How many seconds before market end to check for hedge opportunity
+HEDGE_WINDOW_SEC = int(os.environ.get("HEDGE_WINDOW_SEC", "60"))
+# Enable/disable hedge mode
+HEDGE_ENABLED = os.environ.get("HEDGE_ENABLED", "true").lower() == "true"
+
+
+def _check_late_hedge(
+    client: ClobClient,
+    dry_run: bool = False,
+) -> None:
+    """
+    Check open positions for late-game hedge opportunities.
+
+    For each unresolved trade, if the market is near its end (last 60s)
+    and the opposite side is cheap (ask < HEDGE_MAX_PRICE), buy it.
+    This locks in profit if pair cost < $1.00, or reduces max loss otherwise.
+
+    Example:
+      - Holding DOWN @$0.48 (5 shares = $2.40 invested)
+      - Market ends in 30s, UP ask = $0.25
+      - Buy 5 UP @$0.25 = $1.25
+      - Total invested: $2.40 + $1.25 = $3.65
+      - Guaranteed payout: 5 * $1.00 = $5.00
+      - Locked profit: $5.00 - $3.65 = $1.35
+    """
+    trades = load_trades()
+    now = int(time.time())
+
+    # Find open (unresolved, non-dry-run) trades
+    open_trades = [
+        t for t in trades
+        if t.get("resolved") is None
+        and not t.get("dry_run", True)
+        and not t.get("hedged", False)
+    ]
+
+    if not open_trades:
+        return
+
+    for trade in open_trades:
+        slug = trade.get("slug", "")
+        if not slug:
+            continue
+
+        # Parse market start time from slug: btc-updown-5m-{epoch}
+        try:
+            market_start = int(slug.split("-")[-1])
+        except (ValueError, IndexError):
+            continue
+
+        # Market ends 5 minutes (300s) after start
+        market_end = market_start + 300
+        time_remaining = market_end - now
+
+        # Only hedge in the last HEDGE_WINDOW_SEC seconds
+        if time_remaining > HEDGE_WINDOW_SEC or time_remaining < 5:
+            continue
+
+        direction = trade.get("direction", "")
+        entry_exec_price = trade.get("exec_price") or trade.get("entry_price", 0.5)
+        shares = trade.get("shares", 5)
+
+        # Determine opposite token
+        # We need to look up the market to get both token IDs
+        try:
+            resp = httpx.get(
+                f"https://gamma-api.polymarket.com/events",
+                params={"slug": slug},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                continue
+
+            mkt = data[0].get("markets", [{}])[0]
+            import json as _json
+            token_ids_raw = mkt.get("clobTokenIds")
+            if isinstance(token_ids_raw, str):
+                token_ids = _json.loads(token_ids_raw)
+            else:
+                token_ids = token_ids_raw or []
+
+            if len(token_ids) < 2:
+                continue
+
+            # token_ids[0] = UP, token_ids[1] = DOWN
+            if direction == "down":
+                opposite_token_id = token_ids[0]  # UP
+                opposite_dir = "UP"
+            else:
+                opposite_token_id = token_ids[1]  # DOWN
+                opposite_dir = "DOWN"
+
+        except Exception as exc:
+            log.debug("Hedge: failed to get market data for %s: %s", slug, exc)
+            continue
+
+        # Get opposite side best ask
+        try:
+            book_resp = httpx.get(
+                f"{CLOB_HOST}/book",
+                params={"token_id": opposite_token_id},
+                timeout=10,
+            )
+            book_resp.raise_for_status()
+            book = book_resp.json()
+            asks = sorted(book.get("asks", []), key=lambda a: float(a["price"]))
+
+            if not asks:
+                continue
+
+            opp_best_ask = float(asks[0]["price"])
+            opp_min_order = int(book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+
+        except Exception as exc:
+            log.debug("Hedge: failed to get opposite orderbook for %s: %s", slug, exc)
+            continue
+
+        # Check if hedge is worth it
+        if opp_best_ask > HEDGE_MAX_PRICE:
+            continue
+
+        pair_cost = entry_exec_price + opp_best_ask
+        hedge_shares = min(shares, opp_min_order) if shares < opp_min_order else shares
+
+        if pair_cost < 1.00:
+            locked_profit = (1.00 - pair_cost) * hedge_shares
+            log.info(
+                "  HEDGE: %s %s on %s @ $%.2f (%ds left) -> pair_cost $%.2f, locked profit $%.2f",
+                opposite_dir, slug, opposite_dir, opp_best_ask,
+                time_remaining, pair_cost, locked_profit,
+            )
+        else:
+            # Even if pair > $1.00, cheap opposite reduces max loss
+            loss_without = entry_exec_price * hedge_shares
+            loss_with = (pair_cost - 1.00) * hedge_shares
+            savings = loss_without - loss_with
+            if savings < 0.10:
+                continue  # Not worth it
+            log.info(
+                "  HEDGE: %s on %s @ $%.2f (%ds left) -> reduces max loss by $%.2f",
+                opposite_dir, slug, opp_best_ask, time_remaining, savings,
+            )
+
+        # Place hedge order
+        opp_exec_price = round(min(opp_best_ask + 0.01, 0.95), 2)
+        opp_size = hedge_shares
+
+        # Check liquidity
+        available = sum(float(a["size"]) for a in asks if float(a["price"]) <= opp_exec_price)
+        if available < opp_size:
+            log.info("  HEDGE: insufficient liquidity for %s (%d available, need %d)", slug, available, opp_size)
+            continue
+
+        log.info(
+            "  Placing HEDGE %s (FOK): %d shares @ $%.2f ($%.2f total)",
+            opposite_dir, opp_size, opp_exec_price, opp_size * opp_exec_price,
+        )
+
+        if dry_run:
+            # Mark as hedged in trades
+            _mark_trade_hedged(slug, opposite_token_id, opp_exec_price, opp_size, pair_cost)
+            continue
+
+        try:
+            order_args = OrderArgs(
+                price=opp_exec_price, size=opp_size, side=BUY, token_id=opposite_token_id,
+            )
+            signed = client.create_order(order_args)
+            result = client.post_order(signed, OrderType.FOK)
+
+            order_id = result.get("orderID", result.get("id", "unknown"))
+            status = result.get("status", "unknown")
+
+            if status == "MATCHED" or result.get("success"):
+                log.info("  HEDGE FILLED: %s  pair_cost=$%.2f", order_id, pair_cost)
+                _mark_trade_hedged(slug, opposite_token_id, opp_exec_price, opp_size, pair_cost)
+                record_order_filled()
+            else:
+                log.info("  HEDGE NOT FILLED: %s status=%s", order_id, status)
+        except Exception as exc:
+            log.warning("  HEDGE failed for %s: %s", slug, exc)
+
+
+def _mark_trade_hedged(slug: str, opp_token_id: str, opp_price: float, opp_shares: int, pair_cost: float) -> None:
+    """Mark a trade as hedged in the trades file."""
+    trades = load_trades()
+    for t in trades:
+        if t.get("slug") == slug and t.get("resolved") is None and not t.get("hedged"):
+            t["hedged"] = True
+            t["hedge_token_id"] = opp_token_id
+            t["hedge_price"] = opp_price
+            t["hedge_shares"] = opp_shares
+            t["hedge_pair_cost"] = round(pair_cost, 4)
+            t["hedge_time"] = datetime.now(timezone.utc).isoformat()
+            break
+    tmp = TRADES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(trades, indent=2))
+    tmp.rename(TRADES_FILE)
+
+
+# ──────────────────────────────────────────────────────────────
 # Main loop
 # ──────────────────────────────────────────────────────────────
 
@@ -1104,6 +1312,14 @@ def main() -> None:
                     })
           except Exception as exc:
             log.warning("In-play scan error: %s", exc)
+
+        # ── Late-game hedge check (every cycle if enabled) ────
+        if HEDGE_ENABLED and not shutdown_requested:
+            try:
+                client = get_clob_client()
+                _check_late_hedge(client, dry_run=dry_run)
+            except Exception as exc:
+                log.debug("Hedge check failed: %s", exc)
 
         # ── Early exit check (every cycle if enabled) ─────────
         if EARLY_EXIT_ENABLED and not shutdown_requested:
