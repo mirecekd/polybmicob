@@ -346,6 +346,44 @@ def get_orderbook_signal(
 
 
 # ──────────────────────────────────────────────────────────────
+# Ghost order detection
+# ──────────────────────────────────────────────────────────────
+
+
+def _check_position_exists(token_id: str) -> bool:
+    """
+    Check if we already hold a position for this token on Polymarket.
+
+    Used during order retries to detect ghost orders: if a "Request exception"
+    occurred but the order actually went through on the server, we'd see a
+    position here. This prevents double-ordering on retry.
+    """
+    if not FUNDER:
+        return False
+    try:
+        resp = httpx.get(
+            "https://data-api.polymarket.com/positions",
+            params={
+                "user": FUNDER,
+                "sizeThreshold": 0,
+                "limit": 100,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        positions = resp.json()
+        for pos in positions:
+            # Check if any position's asset matches our token_id
+            asset = pos.get("asset", "")
+            if asset == token_id and float(pos.get("size", 0)) > 0:
+                return True
+        return False
+    except Exception as exc:
+        log.debug("Ghost order check failed: %s", exc)
+        return False  # On error, assume no ghost (safer to not block retry)
+
+
+# ──────────────────────────────────────────────────────────────
 # Order execution
 # ──────────────────────────────────────────────────────────────
 
@@ -439,6 +477,7 @@ def place_trade(
 
         # Retry with exponential backoff on API errors
         # Re-sign each attempt to avoid "Duplicated" rejection
+        # IMPORTANT: Before each retry, check if previous order silently filled
         max_retries = 4
         backoff_schedule = [2, 5, 10, 15]  # seconds between retries
         result = None
@@ -463,7 +502,27 @@ def place_trade(
                     log.warning("  Order attempt %d/%d failed: %s, retrying in %.0fs...",
                                 attempt + 1, max_retries + 1, post_exc, wait)
                     time.sleep(wait)
+                    # Check if the failed order actually went through (ghost order detection)
+                    if _check_position_exists(token_id):
+                        log.warning("  Ghost order detected: position already exists for token, aborting retry")
+                        record_order_filled()
+                        return {
+                            "orderID": "ghost-detected",
+                            "filled": True,
+                            "size": size,
+                            "exec_price": exec_price,
+                        }
                 else:
+                    # Final attempt failed - still check for ghost order
+                    if _check_position_exists(token_id):
+                        log.warning("  Ghost order detected after all retries: position exists for token")
+                        record_order_filled()
+                        return {
+                            "orderID": "ghost-detected",
+                            "filled": True,
+                            "size": size,
+                            "exec_price": exec_price,
+                        }
                     log.error("  Trade failed after %d attempts: %s", max_retries + 1, post_exc)
                     return None
         if result is None:
