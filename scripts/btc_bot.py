@@ -109,7 +109,8 @@ TRADING_HOURS: set[int] | None = (
 MIN_MOMENTUM_PCT = float(os.environ.get("MIN_MOMENTUM_PCT", "0.05"))
 
 # Fallback minimum order size (used if API doesn't return min_order_size)
-MIN_ORDER_SIZE_FALLBACK = int(os.environ.get("MIN_ORDER_SIZE", "5"))
+# Note: Polymarket API returns actual min per market (often 2, sometimes 5)
+MIN_ORDER_SIZE_FALLBACK = int(os.environ.get("MIN_ORDER_SIZE", "1"))
 
 # Maximum execution price per share (skip if orderbook price too high)
 # At $0.70: win=$1.50 loss=$3.50 per 5 shares. At $0.90: win=$0.50 loss=$4.50
@@ -472,12 +473,13 @@ def place_trade(
             return None
 
         log.info(
-            "  Placing %s %s (FOK): %.0f shares @ $%.2f ($%.2f total)",
+            "  Placing %s %s (FOK): %.0f shares @ $%.2f ($%.2f total) [min_order=%d]",
             "DRY-RUN" if dry_run else "ORDER",
             signal.direction.upper(),
             size,
             exec_price,
             size * exec_price,
+            min_order_size,
         )
 
         if dry_run:
