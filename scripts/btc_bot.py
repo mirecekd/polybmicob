@@ -1290,6 +1290,10 @@ def main() -> None:
 
                 result = place_trade(client, ip_trade_signal, MAX_TRADE_USD, dry_run=dry_run)
 
+                if result is None:
+                    # Order failed - remove slug so we can retry
+                    traded_slugs.discard(ip_signal.slug)
+
                 if result is not None:
                     order_id = result.get("orderID", result.get("id", "unknown"))
                     save_trade({
