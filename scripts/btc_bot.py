@@ -111,6 +111,10 @@ MIN_MOMENTUM_PCT = float(os.environ.get("MIN_MOMENTUM_PCT", "0.05"))
 # Fallback minimum order size (used if API doesn't return min_order_size)
 MIN_ORDER_SIZE_FALLBACK = int(os.environ.get("MIN_ORDER_SIZE", "5"))
 
+# Maximum execution price per share (skip if orderbook price too high)
+# At $0.70: win=$1.50 loss=$3.50 per 5 shares. At $0.90: win=$0.50 loss=$4.50
+MAX_EXEC_PRICE = float(os.environ.get("MAX_EXEC_PRICE", "0.70"))
+
 # In-play mode: bet on markets already running (60-180s after start)
 IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
 IN_PLAY_MIN_ELAPSED = int(os.environ.get("IN_PLAY_MIN_ELAPSED_SEC", "60"))
@@ -433,6 +437,20 @@ def place_trade(
         slippage = 0.01
         exec_price = round(min(best_ask + slippage, 0.95), 2)
         exec_price = max(exec_price, 0.02)
+
+        # MAX_EXEC_PRICE filter: skip if orderbook price is too expensive
+        # Buying at $0.90 means risking $4.50 to win $0.50 (on 5 shares)
+        if exec_price > MAX_EXEC_PRICE:
+            log.info(
+                "  Exec price $%.2f > $%.2f max, skipping (bad risk/reward: "
+                "risk $%.2f to win $%.2f on %s)",
+                exec_price, MAX_EXEC_PRICE,
+                exec_price * min_order_size,
+                (1.0 - exec_price) * min_order_size,
+                signal.direction.upper(),
+            )
+            record_order_rejected("price_too_high", f"exec ${exec_price:.2f} > max ${MAX_EXEC_PRICE:.2f}")
+            return None
 
         # Check available liquidity up to our price (may span multiple levels)
         available_size = sum(
