@@ -258,15 +258,33 @@ def analyze_in_play(
     time_factor = min(elapsed / 180.0, 1.0)  # 0.33 at 60s, 0.67 at 120s, 1.0 at 180s
     confidence_boost *= (0.7 + 0.3 * time_factor)
 
+    # Polymarket price momentum: use market price itself as signal
+    # If UP dropped from 0.50 to 0.30, the market "knows" DOWN is winning
+    # Weight market signal more than BTC movement alone
+    market_momentum = abs(up_price - 0.50)  # How far from 50/50
+    if market_momentum > 0.10:
+        # Market has moved significantly - trust it more
+        market_confidence = 0.50 + market_momentum * 0.8  # 0.10->0.58, 0.20->0.66, 0.30->0.74
+        # Blend BTC-based estimate with market-based estimate
+        btc_confidence = 0.50 + confidence_boost
+        # Market gets more weight as it moves further from 50/50
+        market_weight = min(market_momentum * 3, 0.7)  # Up to 70% weight to market
+        estimated_prob_blended = (
+            market_weight * market_confidence
+            + (1 - market_weight) * btc_confidence
+        )
+    else:
+        estimated_prob_blended = 0.50 + confidence_boost
+
     btc_going_up = move_pct > 0
     if btc_going_up:
-        estimated_prob = 0.50 + confidence_boost
+        estimated_prob = estimated_prob_blended
         market_prob = up_price
         direction = "up"
         token_id = token_ids[0]
         entry_price = up_price
     else:
-        estimated_prob = 0.50 + confidence_boost
+        estimated_prob = estimated_prob_blended
         market_prob = down_price
         direction = "down"
         token_id = token_ids[1]
