@@ -21,6 +21,7 @@ Usage:
 import json
 import logging
 import logging.handlers
+import math
 import os
 import signal
 import sys
@@ -847,29 +848,33 @@ def _check_late_hedge(
             continue
 
         pair_cost = entry_exec_price + opp_best_ask
-        hedge_shares = min(shares, opp_min_order) if shares < opp_min_order else shares
 
-        if pair_cost < 1.00:
-            locked_profit = (1.00 - pair_cost) * hedge_shares
+        # Skip hedge if pair_cost >= $1.00 (guaranteed loss, not a real hedge)
+        if pair_cost >= 1.00:
             log.info(
-                "  HEDGE: %s %s on %s @ $%.2f (%ds left) -> pair_cost $%.2f, locked profit $%.2f",
-                opposite_dir, slug, opposite_dir, opp_best_ask,
-                time_remaining, pair_cost, locked_profit,
+                "  HEDGE: skip %s (pair_cost $%.2f >= $1.00, no profit to lock)",
+                slug, pair_cost,
             )
-        else:
-            # Even if pair > $1.00, cheap opposite reduces max loss
-            loss_without = entry_exec_price * hedge_shares
-            loss_with = (pair_cost - 1.00) * hedge_shares
-            savings = loss_without - loss_with
-            if savings < 0.10:
-                continue  # Not worth it
-            log.info(
-                "  HEDGE: %s on %s @ $%.2f (%ds left) -> reduces max loss by $%.2f",
-                opposite_dir, slug, opp_best_ask, time_remaining, savings,
-            )
+            continue
 
-        # Place hedge order
+        # Compute hedge execution price first (best ask + 1c slippage)
         opp_exec_price = round(min(opp_best_ask + 0.01, 0.95), 2)
+
+        hedge_shares = shares
+        # Ensure hedge order meets Polymarket $1.00 minimum order value
+        min_hedge_value = 1.00
+        min_shares_for_value = math.ceil(min_hedge_value / opp_exec_price) if opp_exec_price > 0 else 100
+        hedge_shares = max(hedge_shares, opp_min_order, min_shares_for_value)
+
+        locked_profit = (1.00 - pair_cost) * hedge_shares
+        log.info(
+            "  HEDGE: %s on %s @ $%.2f (%ds left) -> pair_cost $%.2f, "
+            "locked profit $%.2f (%d shares, $%.2f total order)",
+            opposite_dir, slug, opp_best_ask,
+            time_remaining, pair_cost, locked_profit,
+            hedge_shares, hedge_shares * opp_exec_price,
+        )
+
         opp_size = hedge_shares
 
         # Check liquidity
