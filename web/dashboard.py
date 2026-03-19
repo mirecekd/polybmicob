@@ -584,6 +584,18 @@ def render_html() -> str:
     if TRADING_HOURS is not None and now_utc.hour not in TRADING_HOURS:
         notrading_suffix = ' / <span style="color:#f85149;font-weight:700">NOTRADING</span>'
 
+    # MAXLOSS indicator: show when daily loss limit reached
+    max_daily_loss = float(os.environ.get("MAX_DAILY_LOSS_USD", "20.00"))
+    daily_loss_total = sum(
+        abs(t.get("pnl", 0)) for t in today_resolved if not t.get("won", False)
+    )
+    maxloss_suffix = ""
+    if daily_loss_total >= max_daily_loss:
+        maxloss_suffix = (
+            f' / <span style="color:#f85149;font-weight:700">'
+            f'MAXLOSS ${daily_loss_total:.0f}/${max_daily_loss:.0f}</span>'
+        )
+
     # Market session indicator based on UTC hour
     h = now_utc.hour
     if 0 <= h < 3:
@@ -675,7 +687,7 @@ def render_html() -> str:
 <body>
 
 <h1>PolyBMiCoB</h1>
-<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str} / <span style="color:{session_color};font-weight:600">{session_name}</span>{notrading_suffix}</p>
+<p class="sub">BTC 5-Min Micro-Cycle Options Bot -- {now} / {now_et_str} / <span style="color:{session_color};font-weight:600">{session_name}</span>{notrading_suffix}{maxloss_suffix}</p>
 
 <div class="hero">
   <div class="hero-card">
