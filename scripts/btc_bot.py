@@ -43,7 +43,9 @@ from lib.btc_market_scanner import scan_btc_5m_markets
 from lib.price_feed import get_btc_momentum, get_fear_greed_index
 from lib.claim_winnings import claim_all_winnings
 from lib.early_exit import ExitSignal, check_early_exits
+from lib.flash_crash_detector import detect_flash_crashes, FlashCrashSignal
 from lib.in_play_engine import analyze_in_play, scan_in_play_markets
+from lib.ws_price_feed import BtcPriceFeed
 from lib.resolution_tracker import resolve_trades
 from lib.signal_engine import (
     OrderbookSignal,
@@ -138,6 +140,13 @@ KELLY_MAX_USD = float(os.environ.get("KELLY_MAX_USD", "5.00"))  # cap per trade
 INSURANCE_ENABLED = os.environ.get("INSURANCE_ENABLED", "false").lower() == "true"
 INSURANCE_BUDGET_USD = float(os.environ.get("INSURANCE_BUDGET_USD", "1.00"))
 INSURANCE_MAX_PRICE = float(os.environ.get("INSURANCE_MAX_PRICE", "0.15"))
+
+# Flash crash detector: buy undervalued tokens when price drops without BTC justification
+FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
+FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
+FLASH_CRASH_MAX_BTC = float(os.environ.get("FLASH_CRASH_MAX_BTC_PCT", "0.05"))
+FLASH_CRASH_MAX_PRICE = float(os.environ.get("FLASH_CRASH_MAX_PRICE", "0.35"))
+FLASH_CRASH_BUDGET = float(os.environ.get("FLASH_CRASH_BUDGET_USD", "1.00"))
 
 # Early exit: sell positions early to cut losses (hold-to-resolution by default)
 EARLY_EXIT_ENABLED = os.environ.get("EARLY_EXIT_ENABLED", "false").lower() == "true"
@@ -1390,12 +1399,35 @@ def main() -> None:
         log.info("Insurance: disabled")
     if KELLY_ENABLED:
         log.info(
-            "Kelly: ENABLED (%.0fx, $%.2f-$%.2f range)",
+            "Kelly: ENABLED (%.2fx, $%.2f-$%.2f range)",
             KELLY_MULTIPLIER, KELLY_MIN_USD, KELLY_MAX_USD,
         )
     else:
         log.info("Kelly: disabled (fixed $%.2f/trade)", MAX_TRADE_USD)
+    if FLASH_CRASH_ENABLED:
+        log.info(
+            "Flash crash: ENABLED (min drop %.0f%%, max BTC %.2f%%, max price $%.2f)",
+            FLASH_CRASH_MIN_DROP, FLASH_CRASH_MAX_BTC, FLASH_CRASH_MAX_PRICE,
+        )
+    else:
+        log.info("Flash crash: disabled")
     log.info("=" * 60)
+
+    # Start BTC WebSocket price feed (background thread)
+    btc_feed = BtcPriceFeed()
+    try:
+        btc_feed.start()
+        # Wait briefly for first price
+        for _ in range(30):
+            if btc_feed.price > 0:
+                break
+            time.sleep(0.1)
+        if btc_feed.price > 0:
+            log.info("BTC WebSocket feed: $%.0f (live)", btc_feed.price)
+        else:
+            log.warning("BTC WebSocket feed: no price yet (will use REST fallback)")
+    except Exception as exc:
+        log.warning("BTC WebSocket feed failed to start: %s (using REST fallback)", exc)
 
     # Restore state from previous runs (prevents double-trading after restart)
     restore_state_from_trades()
@@ -1573,6 +1605,61 @@ def main() -> None:
                 _check_late_hedge(client, dry_run=dry_run)
             except Exception as exc:
                 log.debug("Hedge check failed: %s", exc)
+
+        # ── Flash crash detector (every cycle if enabled) ─────
+        if FLASH_CRASH_ENABLED and not shutdown_requested:
+            try:
+                fc_signals = detect_flash_crashes(
+                    btc_price_feed=btc_feed,
+                    min_token_drop_pct=FLASH_CRASH_MIN_DROP,
+                    max_btc_move_pct=FLASH_CRASH_MAX_BTC,
+                    max_buy_price=FLASH_CRASH_MAX_PRICE,
+                )
+                for fc in fc_signals:
+                    if shutdown_requested:
+                        break
+                    fc_slug_key = f"{fc.slug}-fc-{fc.direction}"
+                    if fc_slug_key in traded_slugs:
+                        continue
+                    log.info("  FLASH CRASH: %s", fc.reason)
+                    # Create TradeSignal for place_trade
+                    fc_trade = TradeSignal(
+                        direction=fc.direction,
+                        token_id=fc.token_id,
+                        entry_price=fc.current_price,
+                        edge=fc.price_drop_pct / 100,
+                        confidence=0.60,
+                        reason=fc.reason,
+                        market_slug=fc.slug,
+                    )
+                    client = get_clob_client()
+                    traded_slugs.add(fc_slug_key)
+                    result = place_trade(client, fc_trade, FLASH_CRASH_BUDGET, dry_run=dry_run)
+                    if result and result.get("filled"):
+                        order_id = result.get("orderID", "unknown")
+                        save_trade({
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "slug": fc.slug,
+                            "direction": fc.direction,
+                            "token_id": fc.token_id,
+                            "entry_price": fc.current_price,
+                            "shares": int(result.get("size", 5)),
+                            "exec_price": result.get("exec_price", fc.current_price),
+                            "edge": round(fc.price_drop_pct / 100, 4),
+                            "confidence": 0.60,
+                            "reason": fc.reason,
+                            "order_id": order_id,
+                            "dry_run": dry_run,
+                            "btc_price": btc_feed.price,
+                            "momentum": round(fc.btc_move_pct, 4),
+                            "mode": "flash-crash",
+                        })
+                        log.info("  FLASH CRASH FILLED: %s %s @ $%.2f", fc.direction.upper(), fc.slug, fc.current_price)
+                    else:
+                        traded_slugs.discard(fc_slug_key)
+                    time.sleep(RATE_LIMIT_SEC)
+            except Exception as exc:
+                log.debug("Flash crash scan error: %s", exc)
 
         # ── Early exit check (every cycle if enabled) ─────────
         if EARLY_EXIT_ENABLED and not shutdown_requested:

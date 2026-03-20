@@ -17,3 +17,6 @@ py-builder-relayer-client @ git+https://github.com/Polymarket/py-builder-relayer
 py-builder-signing-sdk>=0.0.2
 
 python-dotenv>=1.0.0
+
+# WebSocket client for real-time Binance BTC price feed
+websocket-client>=1.7.0
