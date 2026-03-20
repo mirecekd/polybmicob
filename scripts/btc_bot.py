@@ -122,6 +122,10 @@ MIN_ORDER_SIZE_FALLBACK = int(os.environ.get("MIN_ORDER_SIZE", "1"))
 # At $0.70: win=$1.50 loss=$3.50 per 5 shares. At $0.90: win=$0.50 loss=$4.50
 MAX_EXEC_PRICE = float(os.environ.get("MAX_EXEC_PRICE", "0.70"))
 
+# Minimum market volume (USD) to trade - filters out low-activity markets
+# Low-volume markets have unreliable orderbooks and wide spreads
+MIN_VOLUME_USD = float(os.environ.get("MIN_VOLUME_USD", "0"))
+
 # In-play mode: bet on markets already running (60-180s after start)
 IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
 IN_PLAY_MIN_ELAPSED = int(os.environ.get("IN_PLAY_MIN_ELAPSED_SEC", "60"))
@@ -1411,6 +1415,10 @@ def run_cycle(dry_run: bool = False) -> None:
             log.info("  %s: skip (liquidity $%.0f < $500)", mkt.slug, mkt.liquidity)
             continue
 
+        if MIN_VOLUME_USD > 0 and mkt.volume < MIN_VOLUME_USD:
+            log.info("  %s: skip (volume $%.0f < $%.0f min)", mkt.slug, mkt.volume, MIN_VOLUME_USD)
+            continue
+
         if mkt.up_price is not None and not (0.10 <= mkt.up_price <= 0.90):
             log.info("  %s: skip (Up price %.2f outside 0.10-0.90)", mkt.slug, mkt.up_price)
             continue
@@ -1648,6 +1656,10 @@ def main() -> None:
         )
     else:
         log.info("Maker mode: disabled (FOK taker orders)")
+    if MIN_VOLUME_USD > 0:
+        log.info("Volume filter: ENABLED (min $%.0f)", MIN_VOLUME_USD)
+    else:
+        log.info("Volume filter: disabled (all markets)")
     log.info("=" * 60)
 
     # Start BTC WebSocket price feed (background thread)
@@ -1701,6 +1713,14 @@ def main() -> None:
                 if ip_slug in traded_slugs:
                     log.info("  In-play %s: skip (already traded), %ds elapsed", ip_slug, ip_elapsed)
                     continue
+
+                # Volume filter for in-play markets
+                if MIN_VOLUME_USD > 0:
+                    ip_volume = float(ip_mkt.get("market", {}).get("volume", 0) or 0)
+                    if ip_volume < MIN_VOLUME_USD:
+                        log.info("  In-play %s: skip (volume $%.0f < $%.0f min), %ds elapsed", ip_slug, ip_volume, MIN_VOLUME_USD, ip_elapsed)
+                        continue
+
                 # Dynamic edge: lower threshold for early in-play (market hasn't adjusted yet)
                 # <30s: 5% edge (market makers slow), 30-120s: 8%, >120s: 12%
                 if ip_elapsed < 30:
