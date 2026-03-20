@@ -14,6 +14,8 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from lib.bs_fair_value import BSFairValue, bs_fair_value
+
 log = logging.getLogger("polybmicob.signal")
 
 # ── Polymarket fee calculation ────────────────────────────────
@@ -248,12 +250,15 @@ def generate_signal(
     orderbook: Optional[OrderbookSignal] = None,
     fear_greed_value: Optional[int] = None,
     min_edge: float = DEFAULT_MIN_EDGE,
+    bs_enabled: bool = False,
+    time_remaining_sec: float = 300.0,
 ) -> Optional[TradeSignal]:
     """
     Generate a trade signal using weighted signal fusion.
 
-    Three signal sources:
+    Signal sources:
       1. Momentum (40%): BTC price direction vs market pricing
+         - When bs_enabled=True: uses Black-Scholes fair value instead of heuristic
       2. Orderbook (45%): Bid/ask depth imbalance on CLOB
       3. Sentiment (15%): Fear & Greed dampening factor
 
@@ -268,6 +273,8 @@ def generate_signal(
         orderbook: Optional orderbook imbalance signal.
         fear_greed_value: Optional Fear & Greed index (0-100).
         min_edge: Minimum edge threshold (default 10%).
+        bs_enabled: Use Black-Scholes fair value for momentum probability.
+        time_remaining_sec: Seconds remaining in market (for BS calculation).
 
     Returns:
         TradeSignal if edge >= min_edge, else None.
@@ -279,8 +286,18 @@ def generate_signal(
     if not (0.01 <= up_price <= 0.99) or not (0.01 <= down_price <= 0.99):
         return None
 
-    # --- Signal 1: Momentum ---
-    mom_up_prob, mom_down_prob = _momentum_probability(momentum_pct, trend)
+    # --- Signal 1: Momentum (or Black-Scholes) ---
+    bs_result = None
+    if bs_enabled:
+        bs_result = bs_fair_value(momentum_pct, time_remaining_sec)
+
+    if bs_result is not None:
+        # Use Black-Scholes probability instead of heuristic
+        mom_up_prob = bs_result.prob_up
+        mom_down_prob = bs_result.prob_down
+    else:
+        # Fallback to heuristic momentum probability
+        mom_up_prob, mom_down_prob = _momentum_probability(momentum_pct, trend)
 
     # --- Signal 2: Orderbook ---
     if orderbook is not None and orderbook.direction != "neutral":
@@ -326,6 +343,8 @@ def generate_signal(
 
     # Build reason parts
     reason_parts = [f"momentum={momentum_pct:+.3f}%"]
+    if bs_result is not None:
+        reason_parts.append(f"BS(d2={bs_result.d2:+.2f},vol={bs_result.sigma_5m*100:.2f}%)")
     if orderbook is not None:
         reason_parts.append(
             f"ob_imbalance={orderbook.imbalance:+.2f}"

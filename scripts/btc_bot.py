@@ -149,6 +149,11 @@ INSURANCE_MAX_PRICE = float(os.environ.get("INSURANCE_MAX_PRICE", "0.15"))
 MAKER_MODE_ENABLED = os.environ.get("MAKER_MODE_ENABLED", "false").lower() == "true"
 MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 
+# Black-Scholes fair value: replace heuristic momentum probability with BS model
+# Uses realized BTC volatility from 30x1m klines to compute mathematical probability
+# that BTC continues in current direction for remaining time in 5-min window
+BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
+
 # Flash crash detector: buy undervalued tokens when price drops without BTC justification
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
 FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
@@ -1449,6 +1454,7 @@ def run_cycle(dry_run: bool = False) -> None:
             orderbook=ob_signal,
             fear_greed_value=fg_value,
             min_edge=effective_min_edge,
+            bs_enabled=BS_ENABLED,
         )
 
         # Apply asymmetric edge threshold per direction
@@ -1656,6 +1662,10 @@ def main() -> None:
         )
     else:
         log.info("Maker mode: disabled (FOK taker orders)")
+    if BS_ENABLED:
+        log.info("Black-Scholes: ENABLED (realized vol from 30x1m klines)")
+    else:
+        log.info("Black-Scholes: disabled (heuristic momentum)")
     if MIN_VOLUME_USD > 0:
         log.info("Volume filter: ENABLED (min $%.0f)", MIN_VOLUME_USD)
     else:
