@@ -63,6 +63,7 @@ from lib.stats_collector import (
     record_order_rejected,
     record_resolution,
     record_wallet_balance,
+    load_wallet_balance,
 )
 
 # Load .env from project root
