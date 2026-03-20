@@ -50,6 +50,8 @@ from lib.signal_engine import (
     TradeSignal,
     compute_orderbook_imbalance,
     generate_signal,
+    kelly_fraction,
+    calculate_poly_fee_rate,
 )
 from lib.stats_collector import (
     record_cycle,
@@ -122,6 +124,13 @@ IN_PLAY_ENABLED = os.environ.get("IN_PLAY_ENABLED", "true").lower() == "true"
 IN_PLAY_MIN_ELAPSED = int(os.environ.get("IN_PLAY_MIN_ELAPSED_SEC", "60"))
 IN_PLAY_MAX_ELAPSED = int(os.environ.get("IN_PLAY_MAX_ELAPSED_SEC", "180"))
 IN_PLAY_MIN_MOVE = float(os.environ.get("IN_PLAY_MIN_MOVE_PCT", "0.08"))
+
+# Kelly criterion: dynamic position sizing based on edge and confidence
+# Quarter-Kelly (0.25x) is conservative - protects against model errors
+KELLY_ENABLED = os.environ.get("KELLY_ENABLED", "false").lower() == "true"
+KELLY_MULTIPLIER = float(os.environ.get("KELLY_MULTIPLIER", "0.25"))
+KELLY_MIN_USD = float(os.environ.get("KELLY_MIN_USD", "1.00"))  # Polymarket $1 minimum
+KELLY_MAX_USD = float(os.environ.get("KELLY_MAX_USD", "5.00"))  # cap per trade
 
 # Insurance bet: after momentum trade, buy $1 of cheap opposite side as reversal insurance
 # Profitable when opposite token < $0.15 (EV +$0.66 at 15% reversal rate)
@@ -1378,6 +1387,13 @@ def main() -> None:
         )
     else:
         log.info("Insurance: disabled")
+    if KELLY_ENABLED:
+        log.info(
+            "Kelly: ENABLED (%.0fx, $%.2f-$%.2f range)",
+            KELLY_MULTIPLIER, KELLY_MIN_USD, KELLY_MAX_USD,
+        )
+    else:
+        log.info("Kelly: disabled (fixed $%.2f/trade)", MAX_TRADE_USD)
     log.info("=" * 60)
 
     # Restore state from previous runs (prevents double-trading after restart)
@@ -1482,7 +1498,32 @@ def main() -> None:
                 # duplicate orders from concurrent cycles during retry delays
                 traded_slugs.add(ip_signal.slug)
 
-                result = place_trade(client, ip_trade_signal, MAX_TRADE_USD, dry_run=dry_run)
+                # Kelly criterion: dynamic position sizing based on edge
+                if KELLY_ENABLED:
+                    kf = kelly_fraction(ip_signal.confidence, ip_signal.entry_price, KELLY_MULTIPLIER)
+                    fee_rate = calculate_poly_fee_rate(ip_signal.entry_price)
+                    # Adjust edge for fees before Kelly
+                    net_edge = ip_signal.edge - fee_rate
+                    if net_edge <= 0:
+                        log.info(
+                            "  In-play %s: SKIP (edge %.1f%% - fee %.2f%% = net %.1f%% <= 0)",
+                            ip_slug, ip_signal.edge * 100, fee_rate * 100, net_edge * 100,
+                        )
+                        traded_slugs.discard(ip_signal.slug)
+                        continue
+                    # Use last known wallet balance for Kelly calculation
+                    wallet_balance = load_wallet_balance().get("usdc_balance", 30.0)
+                    kelly_usd = max(KELLY_MIN_USD, min(wallet_balance * kf, KELLY_MAX_USD))
+                    log.info(
+                        "    Kelly: f=%.1f%% of $%.0f = $%.2f (conf=%.0f%%, fee=%.2f%%)",
+                        kf * 100, wallet_balance, kelly_usd,
+                        ip_signal.confidence * 100, fee_rate * 100,
+                    )
+                    trade_size_usd = kelly_usd
+                else:
+                    trade_size_usd = MAX_TRADE_USD
+
+                result = place_trade(client, ip_trade_signal, trade_size_usd, dry_run=dry_run)
 
                 if result is None:
                     # Order failed - remove slug so we can retry

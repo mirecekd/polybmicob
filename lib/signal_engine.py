@@ -16,6 +16,66 @@ from typing import Optional
 
 log = logging.getLogger("polybmicob.signal")
 
+# ── Polymarket fee calculation ────────────────────────────────
+# Crypto markets: feeRate=0.25, exponent=2
+# fee = shares * price * feeRate * (price * (1 - price))^exponent
+POLY_FEE_RATE = 0.25
+POLY_FEE_EXPONENT = 2
+
+
+def calculate_poly_fee(shares: float, price: float) -> float:
+    """
+    Calculate Polymarket taker fee for crypto markets.
+
+    Fee is dynamic: highest at p=0.50 (1.56%), lowest near 0 or 1 (0%).
+    Formula: shares * price * feeRate * (price * (1-price))^exponent
+    """
+    if price <= 0 or price >= 1:
+        return 0.0
+    return shares * price * POLY_FEE_RATE * (price * (1 - price)) ** POLY_FEE_EXPONENT
+
+
+def calculate_poly_fee_rate(price: float) -> float:
+    """Return effective fee rate (%) for a given token price."""
+    if price <= 0 or price >= 1:
+        return 0.0
+    return POLY_FEE_RATE * (price * (1 - price)) ** POLY_FEE_EXPONENT
+
+
+def kelly_fraction(
+    win_prob: float,
+    entry_price: float,
+    kelly_multiplier: float = 0.25,
+) -> float:
+    """
+    Calculate optimal bet fraction using Fractional Kelly Criterion.
+
+    For binary outcomes on Polymarket:
+      b = (1 - entry_price) / entry_price  (net odds)
+      f* = (b*p - q) / b
+      Fractional Kelly = f* * kelly_multiplier
+
+    Args:
+        win_prob: Estimated probability of winning (0-1).
+        entry_price: Token price (cost per share, 0-1).
+        kelly_multiplier: Fraction of full Kelly (0.25 = Quarter-Kelly).
+
+    Returns:
+        Fraction of bankroll to bet (0.0 to 1.0, clamped).
+    """
+    if entry_price <= 0 or entry_price >= 1 or win_prob <= 0:
+        return 0.0
+
+    b = (1.0 - entry_price) / entry_price  # net odds
+    q = 1.0 - win_prob
+    full_kelly = (b * win_prob - q) / b
+
+    if full_kelly <= 0:
+        return 0.0  # negative Kelly = don't bet
+
+    return min(full_kelly * kelly_multiplier, 0.25)  # cap at 25% of bankroll
+
+
 # Signal weights (must sum to 1.0)
 WEIGHT_MOMENTUM = 0.40
 WEIGHT_ORDERBOOK = 0.45
