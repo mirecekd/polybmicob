@@ -141,6 +141,10 @@ INSURANCE_ENABLED = os.environ.get("INSURANCE_ENABLED", "false").lower() == "tru
 INSURANCE_BUDGET_USD = float(os.environ.get("INSURANCE_BUDGET_USD", "1.00"))
 INSURANCE_MAX_PRICE = float(os.environ.get("INSURANCE_MAX_PRICE", "0.15"))
 
+# Maker mode: use GTC post-only orders for pre-market (earn maker rebate instead of paying taker fee)
+MAKER_MODE_ENABLED = os.environ.get("MAKER_MODE_ENABLED", "false").lower() == "true"
+MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
+
 # Flash crash detector: buy undervalued tokens when price drops without BTC justification
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
 FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
@@ -591,6 +595,212 @@ def place_trade(
 
     except Exception as exc:
         log.error("  Trade failed: %s", exc)
+        record_order_rejected("error", str(exc)[:80])
+        return None
+
+
+# ──────────────────────────────────────────────────────────────
+# Maker order execution (GTC post-only for pre-market)
+# ──────────────────────────────────────────────────────────────
+
+
+def place_maker_trade(
+    client: ClobClient,
+    signal: TradeSignal,
+    size_usd: float,
+    timeout_sec: int = 120,
+    dry_run: bool = False,
+) -> dict | None:
+    """
+    Place a GTC post-only buy order for pre-market signals (maker strategy).
+
+    Post-only ensures the order rests on the book (maker) and never crosses
+    the spread (which would make it a taker). Makers pay $0 fee on Polymarket
+    crypto markets and earn a share of the 20% maker rebate pool.
+
+    Strategy:
+      1. Place GTC post-only at best bid + $0.01 (aggressive but still maker)
+      2. Monitor order status every 5s for up to timeout_sec
+      3. If filled -> return success
+      4. If not filled by timeout -> cancel and return None
+
+    Args:
+        client: ClobClient instance.
+        signal: TradeSignal with direction, token_id, entry_price.
+        size_usd: Dollar amount to trade.
+        timeout_sec: Max seconds to wait for fill (default 120).
+        dry_run: If True, simulate without placing real orders.
+
+    Returns:
+        Order result dict with 'filled'=True, or None on failure/timeout.
+    """
+    token_id = signal.token_id
+
+    try:
+        # Fetch orderbook to determine maker price
+        raw_resp = httpx.get(
+            f"{CLOB_HOST}/book",
+            params={"token_id": token_id},
+            timeout=15,
+        )
+        raw_resp.raise_for_status()
+        raw_book = raw_resp.json()
+
+        min_order_size = int(raw_book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+        bids = sorted(raw_book.get("bids", []), key=lambda b: float(b["price"]), reverse=True)
+        asks = sorted(raw_book.get("asks", []), key=lambda a: float(a["price"]))
+
+        if not asks:
+            log.info("  MAKER: no asks on orderbook, skipping (no liquidity)")
+            record_order_rejected("no_asks", "Empty orderbook (maker)")
+            return None
+
+        best_ask = float(asks[0]["price"])
+        best_bid = float(bids[0]["price"]) if bids else 0.01
+
+        # Maker price: best bid + $0.01 (one tick above best bid)
+        # Must stay below best ask to be post-only (otherwise it would cross spread)
+        maker_price = round(best_bid + 0.01, 2)
+
+        # Safety: if our maker price >= best ask, reduce to best ask - 0.01
+        # This ensures post-only won't reject (crossing the spread = taker)
+        if maker_price >= best_ask:
+            maker_price = round(best_ask - 0.01, 2)
+
+        maker_price = max(maker_price, 0.02)
+
+        # MAX_EXEC_PRICE filter
+        if maker_price > MAX_EXEC_PRICE:
+            log.info(
+                "  MAKER: price $%.2f > $%.2f max, skipping",
+                maker_price, MAX_EXEC_PRICE,
+            )
+            record_order_rejected("price_too_high", f"maker ${maker_price:.2f} > max ${MAX_EXEC_PRICE:.2f}")
+            return None
+
+        # Calculate shares
+        size = round(size_usd / maker_price, 0)
+        if size < min_order_size:
+            size = min_order_size
+
+        log.info(
+            "  Placing %s %s (GTC post-only): %.0f shares @ $%.2f ($%.2f total) "
+            "[bid=$%.2f ask=$%.2f spread=$%.2f, timeout=%ds]",
+            "DRY-RUN" if dry_run else "MAKER ORDER",
+            signal.direction.upper(),
+            size, maker_price, size * maker_price,
+            best_bid, best_ask, best_ask - best_bid,
+            timeout_sec,
+        )
+
+        if dry_run:
+            return {
+                "orderID": "dry-run-maker",
+                "status": "dry-run",
+                "exec_price": maker_price,
+                "size": size,
+                "filled": True,
+                "mode": "maker",
+            }
+
+        # Create and post GTC post-only order
+        order_args = OrderArgs(
+            price=maker_price, size=size, side=BUY, token_id=token_id,
+        )
+
+        try:
+            signed = client.create_order(order_args)
+            result = client.post_order(signed, OrderType.GTC, post_only=True)
+        except Exception as post_exc:
+            err_msg = str(post_exc).lower()
+            if "post only" in err_msg or "would match" in err_msg:
+                log.info("  MAKER: post-only rejected (would cross spread), skipping")
+                record_order_rejected("post_only_reject", "Would cross spread")
+                return None
+            if "balance" in err_msg or "allowance" in err_msg:
+                log.warning("  MAKER: insufficient balance/allowance")
+                record_order_rejected("no_balance", "Insufficient balance (maker)")
+                return None
+            log.error("  MAKER: order placement failed: %s", post_exc)
+            record_order_rejected("error", str(post_exc)[:80])
+            return None
+
+        order_id = result.get("orderID", result.get("id", ""))
+        if not order_id:
+            log.warning("  MAKER: no order ID returned, aborting")
+            return None
+
+        log.info("  MAKER ORDER PLACED: %s (waiting for fill...)", order_id)
+
+        # Monitor order status until filled or timeout
+        start_time = time.time()
+        poll_interval = 5  # seconds between status checks
+
+        while time.time() - start_time < timeout_sec:
+            if shutdown_requested:
+                log.info("  MAKER: shutdown requested, cancelling order %s", order_id)
+                try:
+                    client.cancel(order_id)
+                except Exception:
+                    pass
+                return None
+
+            time.sleep(poll_interval)
+
+            # Check if position exists (order filled)
+            if _check_position_exists(token_id):
+                elapsed = int(time.time() - start_time)
+                log.info(
+                    "  MAKER ORDER FILLED: %s (%ds wait, saved taker fee)",
+                    order_id, elapsed,
+                )
+                record_order_filled()
+                return {
+                    "orderID": order_id,
+                    "filled": True,
+                    "size": size,
+                    "exec_price": maker_price,
+                    "mode": "maker",
+                    "wait_sec": elapsed,
+                }
+
+            # Log progress every 30s
+            elapsed = int(time.time() - start_time)
+            if elapsed % 30 < poll_interval:
+                log.info(
+                    "  MAKER: waiting for fill... %ds/%ds elapsed",
+                    elapsed, timeout_sec,
+                )
+
+        # Timeout reached - cancel the order
+        elapsed = int(time.time() - start_time)
+        log.info(
+            "  MAKER TIMEOUT: order %s not filled after %ds, cancelling",
+            order_id, elapsed,
+        )
+        try:
+            client.cancel(order_id)
+            log.info("  MAKER: order %s cancelled", order_id)
+        except Exception as cancel_exc:
+            log.warning("  MAKER: cancel failed: %s (may have filled)", cancel_exc)
+            # Final check - maybe it filled during cancel
+            if _check_position_exists(token_id):
+                log.info("  MAKER: order filled during cancel! %s", order_id)
+                record_order_filled()
+                return {
+                    "orderID": order_id,
+                    "filled": True,
+                    "size": size,
+                    "exec_price": maker_price,
+                    "mode": "maker",
+                    "wait_sec": elapsed,
+                }
+
+        record_order_rejected("maker_timeout", f"Not filled in {timeout_sec}s")
+        return None
+
+    except Exception as exc:
+        log.error("  MAKER trade failed: %s", exc)
         record_order_rejected("error", str(exc)[:80])
         return None
 
@@ -1332,7 +1542,26 @@ def run_cycle(dry_run: bool = False) -> None:
         # duplicate orders from concurrent cycles during retry delays
         traded_slugs.add(mkt.slug)
 
-        result = place_trade(client, sig, MAX_TRADE_USD, dry_run=dry_run)
+        # Choose execution strategy: maker (GTC post-only) or taker (FOK)
+        # Maker mode: $0 fee + maker rebate, but order may not fill
+        # Taker mode: immediate fill, but pays taker fee (up to 1.56%)
+        result = None
+        trade_mode = "pre-market"
+        if MAKER_MODE_ENABLED:
+            log.info("    Using MAKER mode (GTC post-only, timeout=%ds)", MAKER_TIMEOUT_SEC)
+            result = place_maker_trade(
+                client, sig, MAX_TRADE_USD,
+                timeout_sec=MAKER_TIMEOUT_SEC, dry_run=dry_run,
+            )
+            trade_mode = "pre-market-maker"
+            if result is None:
+                log.info("    Maker order not filled, no fallback to FOK")
+        else:
+            result = place_trade(client, sig, MAX_TRADE_USD, dry_run=dry_run)
+
+        if result is None:
+            # Order failed/timed out - remove slug so we can retry next cycle
+            traded_slugs.discard(mkt.slug)
 
         if result is not None:
             order_id = result.get("orderID", result.get("id", "unknown"))
@@ -1354,6 +1583,7 @@ def run_cycle(dry_run: bool = False) -> None:
                 "btc_price": snapshot.price,
                 "momentum": round(snapshot.momentum_5m, 4),
                 "fear_greed": fg_value,
+                "mode": trade_mode,
             }
             save_trade(trade_record)
 
@@ -1411,6 +1641,13 @@ def main() -> None:
         )
     else:
         log.info("Flash crash: disabled")
+    if MAKER_MODE_ENABLED:
+        log.info(
+            "Maker mode: ENABLED (GTC post-only, timeout=%ds, $0 fee + 20%% rebate)",
+            MAKER_TIMEOUT_SEC,
+        )
+    else:
+        log.info("Maker mode: disabled (FOK taker orders)")
     log.info("=" * 60)
 
     # Start BTC WebSocket price feed (background thread)
