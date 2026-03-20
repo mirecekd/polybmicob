@@ -163,6 +163,7 @@ def analyze_in_play(
     market_data: dict,
     min_move_pct: float = 0.08,
     min_edge: float = 0.05,
+    btc_current_price: float | None = None,
 ) -> InPlaySignal | None:
     """
     Analyze a running market for in-play edge.
@@ -173,6 +174,8 @@ def analyze_in_play(
         market_data: Dict from scan_in_play_markets().
         min_move_pct: Minimum BTC move % to generate signal (default 0.08%).
         min_edge: Minimum edge to generate signal (default 5%).
+        btc_current_price: Optional real-time BTC price from WebSocket feed.
+            If provided, skips REST API call for current price (<1s vs 10s latency).
 
     Returns:
         InPlaySignal or None.
@@ -223,7 +226,8 @@ def analyze_in_play(
     if btc_start is None:
         return None
 
-    btc_now = _get_btc_current_price()
+    # Use WebSocket price if available (instant), fall back to REST
+    btc_now = btc_current_price if btc_current_price and btc_current_price > 0 else _get_btc_current_price()
     if btc_now is None:
         return None
 

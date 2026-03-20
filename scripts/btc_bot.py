@@ -1473,8 +1473,11 @@ def main() -> None:
                 else:
                     ip_edge = min(MIN_EDGE_UP, MIN_EDGE_DOWN)
 
+                # Pass WS BTC price to avoid REST call (instant vs 10s)
+                ws_btc = btc_feed.price if btc_feed.is_fresh() else None
                 ip_signal = analyze_in_play(
                     ip_mkt, min_move_pct=IN_PLAY_MIN_MOVE, min_edge=ip_edge,
+                    btc_current_price=ws_btc,
                 )
                 if ip_signal is None:
                     # analyze_in_play now logs the reason at INFO level
