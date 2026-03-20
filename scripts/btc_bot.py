@@ -1415,7 +1415,15 @@ def main() -> None:
                 if ip_slug in traded_slugs:
                     log.info("  In-play %s: skip (already traded), %ds elapsed", ip_slug, ip_elapsed)
                     continue
-                ip_edge = min(MIN_EDGE_UP, MIN_EDGE_DOWN)
+                # Dynamic edge: lower threshold for early in-play (market hasn't adjusted yet)
+                # <30s: 5% edge (market makers slow), 30-120s: 8%, >120s: 12%
+                if ip_elapsed < 30:
+                    ip_edge = 0.05
+                elif ip_elapsed < 120:
+                    ip_edge = 0.08
+                else:
+                    ip_edge = min(MIN_EDGE_UP, MIN_EDGE_DOWN)
+
                 ip_signal = analyze_in_play(
                     ip_mkt, min_move_pct=IN_PLAY_MIN_MOVE, min_edge=ip_edge,
                 )
@@ -1423,14 +1431,13 @@ def main() -> None:
                     # analyze_in_play now logs the reason at INFO level
                     continue
 
-                # Asymmetric edge for in-play too
-                ip_required = MIN_EDGE_UP if ip_signal.direction == "up" else MIN_EDGE_DOWN
-                if ip_signal.edge < ip_required:
+                # Apply dynamic edge threshold (already computed above based on elapsed)
+                if ip_signal.edge < ip_edge:
                     log.info(
-                        "  In-play %s: SKIP %s (edge %.1f%% < %.0f%% %s threshold), BTC %+.3f%%",
+                        "  In-play %s: SKIP %s (edge %.1f%% < %.0f%% threshold @%ds), BTC %+.3f%%",
                         ip_slug, ip_signal.direction.upper(),
-                        ip_signal.edge * 100, ip_required * 100,
-                        ip_signal.direction.upper(), ip_signal.btc_move_pct,
+                        ip_signal.edge * 100, ip_edge * 100,
+                        ip_elapsed, ip_signal.btc_move_pct,
                     )
                     continue
 
