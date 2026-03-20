@@ -123,6 +123,12 @@ IN_PLAY_MIN_ELAPSED = int(os.environ.get("IN_PLAY_MIN_ELAPSED_SEC", "60"))
 IN_PLAY_MAX_ELAPSED = int(os.environ.get("IN_PLAY_MAX_ELAPSED_SEC", "180"))
 IN_PLAY_MIN_MOVE = float(os.environ.get("IN_PLAY_MIN_MOVE_PCT", "0.08"))
 
+# Insurance bet: after momentum trade, buy $1 of cheap opposite side as reversal insurance
+# Profitable when opposite token < $0.15 (EV +$0.66 at 15% reversal rate)
+INSURANCE_ENABLED = os.environ.get("INSURANCE_ENABLED", "false").lower() == "true"
+INSURANCE_BUDGET_USD = float(os.environ.get("INSURANCE_BUDGET_USD", "1.00"))
+INSURANCE_MAX_PRICE = float(os.environ.get("INSURANCE_MAX_PRICE", "0.15"))
+
 # Early exit: sell positions early to cut losses (hold-to-resolution by default)
 EARLY_EXIT_ENABLED = os.environ.get("EARLY_EXIT_ENABLED", "false").lower() == "true"
 STOP_LOSS_THRESHOLD = float(os.environ.get("STOP_LOSS_THRESHOLD", "0.30"))
@@ -699,6 +705,165 @@ def place_sell_order(
         return None
 
 
+def _place_insurance_bet(
+    client: ClobClient,
+    slug: str,
+    direction: str,
+    market_data: dict,
+    dry_run: bool = False,
+) -> None:
+    """
+    Buy $1 of the cheap opposite side as reversal insurance.
+
+    After a momentum trade (e.g. bought DOWN @$0.60), immediately buy
+    $1 of the opposite (UP) if it's cheap enough (< INSURANCE_MAX_PRICE).
+
+    Math at $0.09 entry, 15% reversal rate:
+      Win: 11 shares x $0.91 = +$10.01
+      Loss: 11 shares x $0.09 = -$0.99
+      EV = 15% x $10.01 - 85% x $0.99 = +$0.66
+
+    When momentum LOSES (-$3.00), insurance saves you 15% of the time:
+      -$3.00 + $10.01 = +$7.01 (converts loss to big win)
+    """
+    try:
+        # Determine opposite token ID from market data
+        import json as _json
+        mkt = market_data.get("market", {})
+        token_ids_raw = mkt.get("clobTokenIds")
+        if isinstance(token_ids_raw, str):
+            token_ids = _json.loads(token_ids_raw)
+        elif isinstance(token_ids_raw, list):
+            token_ids = token_ids_raw
+        else:
+            token_ids = []
+
+        if len(token_ids) < 2:
+            # Fallback: look up from Gamma API
+            resp = httpx.get(
+                "https://gamma-api.polymarket.com/events",
+                params={"slug": slug},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                return
+            mkt = data[0].get("markets", [{}])[0]
+            token_ids_raw = mkt.get("clobTokenIds")
+            if isinstance(token_ids_raw, str):
+                token_ids = _json.loads(token_ids_raw)
+            else:
+                token_ids = token_ids_raw or []
+            if len(token_ids) < 2:
+                return
+
+        # token_ids[0] = UP, token_ids[1] = DOWN
+        if direction == "down":
+            opp_token_id = token_ids[0]  # buy UP as insurance
+            opp_dir = "UP"
+        else:
+            opp_token_id = token_ids[1]  # buy DOWN as insurance
+            opp_dir = "DOWN"
+
+        # Get opposite orderbook
+        book_resp = httpx.get(
+            f"{CLOB_HOST}/book",
+            params={"token_id": opp_token_id},
+            timeout=10,
+        )
+        book_resp.raise_for_status()
+        book = book_resp.json()
+        asks = sorted(book.get("asks", []), key=lambda a: float(a["price"]))
+        opp_min_order = int(book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+
+        if not asks:
+            log.info("  INSURANCE: no asks for opposite %s on %s", opp_dir, slug)
+            return
+
+        opp_best_ask = float(asks[0]["price"])
+
+        # Only buy if cheap enough
+        if opp_best_ask > INSURANCE_MAX_PRICE:
+            log.info(
+                "  INSURANCE: skip %s (opposite %s @ $%.2f > $%.2f max)",
+                slug, opp_dir, opp_best_ask, INSURANCE_MAX_PRICE,
+            )
+            return
+
+        opp_exec_price = round(min(opp_best_ask + 0.01, 0.95), 2)
+        shares = int(INSURANCE_BUDGET_USD / opp_exec_price)
+
+        # Ensure meets $1.00 minimum order value
+        min_shares_for_value = math.ceil(1.00 / opp_exec_price) if opp_exec_price > 0 else 100
+        shares = max(shares, opp_min_order, min_shares_for_value)
+        total_cost = shares * opp_exec_price
+
+        # Check liquidity
+        available = sum(float(a["size"]) for a in asks if float(a["price"]) <= opp_exec_price)
+        if available < shares:
+            log.info("  INSURANCE: insufficient liquidity for %s (%d available, need %d)", slug, available, shares)
+            return
+
+        potential_win = (1.0 - opp_exec_price) * shares
+        log.info(
+            "  INSURANCE: buy %s on %s @ $%.2f (%d shares, $%.2f) -> win $%.2f / lose $%.2f",
+            opp_dir, slug, opp_exec_price, shares, total_cost,
+            potential_win, total_cost,
+        )
+
+        if dry_run:
+            save_trade({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "slug": slug,
+                "direction": opp_dir.lower(),
+                "token_id": opp_token_id,
+                "entry_price": opp_best_ask,
+                "shares": shares,
+                "exec_price": opp_exec_price,
+                "edge": 0,
+                "confidence": 0,
+                "reason": f"INSURANCE: cheap {opp_dir} @ ${opp_exec_price:.2f}",
+                "order_id": "dry-run-insurance",
+                "dry_run": True,
+                "mode": "insurance",
+            })
+            return
+
+        order_args = OrderArgs(
+            price=opp_exec_price, size=shares, side=BUY, token_id=opp_token_id,
+        )
+        signed = client.create_order(order_args)
+        result = client.post_order(signed, OrderType.FOK)
+
+        order_id = result.get("orderID", result.get("id", "unknown"))
+        status = result.get("status", "unknown")
+
+        if status == "MATCHED" or result.get("success"):
+            log.info("  INSURANCE FILLED: %s %s @ $%.2f (%d shares, $%.2f)", opp_dir, slug, opp_exec_price, shares, total_cost)
+            record_order_filled()
+            save_trade({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "slug": slug,
+                "direction": opp_dir.lower(),
+                "token_id": opp_token_id,
+                "entry_price": opp_best_ask,
+                "shares": shares,
+                "exec_price": opp_exec_price,
+                "edge": 0,
+                "confidence": 0,
+                "reason": f"INSURANCE: cheap {opp_dir} @ ${opp_exec_price:.2f}",
+                "order_id": order_id,
+                "dry_run": False,
+                "mode": "insurance",
+            })
+        else:
+            log.info("  INSURANCE NOT FILLED: %s status=%s", order_id, status)
+
+    except Exception as exc:
+        log.debug("Insurance bet failed for %s: %s", slug, exc)
+
+
 def _mark_trade_early_exit(slug: str, sell_price: float, pnl: float, trigger: str) -> None:
     """Mark a trade as early-exited in the trades file."""
     trades = load_trades()
@@ -1206,6 +1371,13 @@ def main() -> None:
         )
     else:
         log.info("Early exit: disabled (hold-to-resolution)")
+    if INSURANCE_ENABLED:
+        log.info(
+            "Insurance: ENABLED ($%.2f budget, max entry $%.2f)",
+            INSURANCE_BUDGET_USD, INSURANCE_MAX_PRICE,
+        )
+    else:
+        log.info("Insurance: disabled")
     log.info("=" * 60)
 
     # Restore state from previous runs (prevents double-trading after restart)
@@ -1329,6 +1501,19 @@ def main() -> None:
                         "fear_greed": None,
                         "mode": "in-play",
                     })
+
+                    # Insurance bet: buy $1 of cheap opposite side immediately
+                    if INSURANCE_ENABLED:
+                        try:
+                            _place_insurance_bet(
+                                client=client,
+                                slug=ip_signal.slug,
+                                direction=ip_signal.direction,
+                                market_data=ip_mkt,
+                                dry_run=dry_run,
+                            )
+                        except Exception as ins_exc:
+                            log.debug("Insurance bet error: %s", ins_exc)
           except Exception as exc:
             log.warning("In-play scan error: %s", exc)
 
