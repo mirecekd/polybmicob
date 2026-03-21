@@ -705,9 +705,74 @@ def main() -> None:
     log.info("Mode: %s", "DRY RUN" if dry_run else "LIVE")
     log.info("Architecture: EVENT-DRIVEN (EventBus + MarketClock + WS feeds)")
     log.info(
-        "Config: max_trade=$%.2f, min_edge=%.0f%%, max_exec=$%.2f",
-        MAX_TRADE_USD, MIN_EDGE * 100, MAX_EXEC_PRICE,
+        "Config: max_trade=$%.2f, min_edge=%.0f%% (UP=%.0f%% DOWN=%.0f%%), max_exec=$%.2f",
+        MAX_TRADE_USD, MIN_EDGE * 100, MIN_EDGE_UP * 100, MIN_EDGE_DOWN * 100, MAX_EXEC_PRICE,
     )
+    log.info(
+        "Risk: max_daily_loss=$%.2f, max_consec_losses=%d, pause=%ds",
+        MAX_DAILY_LOSS_USD, MAX_CONSECUTIVE_LOSSES, PAUSE_AFTER_LOSSES_SEC,
+    )
+    if TRADING_HOURS is not None:
+        log.info("Trading hours (UTC): %s", ",".join(str(h) for h in sorted(TRADING_HOURS)))
+    else:
+        log.info("Trading hours: ALL (no filter)")
+    if IN_PLAY_ENABLED:
+        log.info(
+            "In-play: ENABLED (elapsed %d-%ds, min_move=%.2f%%, dynamic edge 5%%/8%%/12%%)",
+            IN_PLAY_MIN_ELAPSED, IN_PLAY_MAX_ELAPSED, IN_PLAY_MIN_MOVE,
+        )
+    else:
+        log.info("In-play: disabled")
+    if KELLY_ENABLED:
+        log.info(
+            "Kelly: ENABLED (%.2fx, $%.2f-$%.2f range)",
+            KELLY_MULTIPLIER, KELLY_MIN_USD, KELLY_MAX_USD,
+        )
+    else:
+        log.info("Kelly: disabled (fixed $%.2f/trade)", MAX_TRADE_USD)
+    if INSURANCE_ENABLED:
+        log.info(
+            "Insurance: ENABLED ($%.2f budget, max entry $%.2f)",
+            INSURANCE_BUDGET_USD, INSURANCE_MAX_PRICE,
+        )
+    else:
+        log.info("Insurance: disabled")
+    if MAKER_MODE_ENABLED:
+        log.info(
+            "Maker mode: ENABLED (GTC post-only, timeout=%ds, $0 fee + 20%% rebate)",
+            MAKER_TIMEOUT_SEC,
+        )
+    else:
+        log.info("Maker mode: disabled (FOK taker orders)")
+    if BS_ENABLED:
+        log.info("Black-Scholes: ENABLED (realized vol from 30x1m klines)")
+    else:
+        log.info("Black-Scholes: disabled (heuristic momentum)")
+    if HEDGE_ENABLED:
+        log.info(
+            "Hedge: ENABLED (max_price=$%.2f, window=%ds)",
+            HEDGE_MAX_PRICE, HEDGE_WINDOW_SEC,
+        )
+    else:
+        log.info("Hedge: disabled")
+    if FLASH_CRASH_ENABLED:
+        log.info(
+            "Flash crash: ENABLED (min drop %.0f%%, max BTC %.2f%%, max price $%.2f)",
+            FLASH_CRASH_MIN_DROP, FLASH_CRASH_MAX_BTC, FLASH_CRASH_MAX_PRICE,
+        )
+    else:
+        log.info("Flash crash: disabled")
+    if EARLY_EXIT_ENABLED:
+        log.info(
+            "Early exit: ENABLED (stop-loss<$%.2f, reversal>%.2f%%)",
+            STOP_LOSS_THRESHOLD, MOMENTUM_REVERSAL_PCT,
+        )
+    else:
+        log.info("Early exit: disabled (hold-to-resolution)")
+    if MIN_VOLUME_USD > 0:
+        log.info("Volume filter: ENABLED (min $%.0f)", MIN_VOLUME_USD)
+    else:
+        log.info("Volume filter: disabled (all markets)")
     log.info("=" * 60)
 
     # ── 1. Create EventBus ────────────────────────────────────
