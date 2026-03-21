@@ -73,7 +73,7 @@ class EventBus:
     Events can be emitted from any thread (thread-safe queue).
     """
 
-    def __init__(self, max_queue_size: int = 1000) -> None:
+    def __init__(self, max_queue_size: int = 10000) -> None:
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
         self._queue: Queue[Event | None] = Queue(maxsize=max_queue_size)
         self._scheduled: list[ScheduledTask] = []
@@ -84,6 +84,8 @@ class EventBus:
         # Stats
         self.events_processed: int = 0
         self.events_dropped: int = 0
+        self._drop_log_count: int = 0
+        self._drop_log_interval: int = 100  # log every Nth drop
 
     def on(self, event_type: str, handler: EventHandler) -> None:
         """
@@ -115,7 +117,12 @@ class EventBus:
             self._queue.put_nowait(event)
         except Exception:
             self.events_dropped += 1
-            log.warning("Event queue full, dropped '%s' event", event_type)
+            self._drop_log_count += 1
+            if self._drop_log_count <= 1 or self._drop_log_count % self._drop_log_interval == 0:
+                log.warning(
+                    "Event queue full, dropped '%s' event (total dropped: %d)",
+                    event_type, self.events_dropped,
+                )
 
     def schedule(
         self,
