@@ -1877,7 +1877,7 @@ def main() -> None:
                 log.debug("Hedge check failed: %s", exc)
 
         # ── Flash crash detector (every cycle if enabled) ─────
-        if FLASH_CRASH_ENABLED and not shutdown_requested:
+        if FLASH_CRASH_ENABLED and not shutdown_requested and daily_loss_usd < MAX_DAILY_LOSS_USD:
             try:
                 fc_signals = detect_flash_crashes(
                     btc_price_feed=btc_feed,
