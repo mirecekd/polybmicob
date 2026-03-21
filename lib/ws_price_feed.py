@@ -6,13 +6,18 @@ Runs in a background thread, updates shared state that the bot reads instantly.
 
 Replaces REST polling (10s latency) with event-driven updates (<1s latency).
 
-Usage:
+When an EventBus is provided, emits "btc_price" events on every price update:
+    {"price": 84500.0, "prev_price": 84490.0, "change_pct": 0.012}
+
+Usage (standalone - backwards compatible):
     feed = BtcPriceFeed()
     feed.start()
-    # ... later ...
-    price = feed.price          # latest BTC price (float)
-    change = feed.change_since(start_price)  # % change since a reference price
-    feed.stop()
+    price = feed.price
+
+Usage (event-driven):
+    feed = BtcPriceFeed(bus=event_bus)
+    feed.start()
+    # price updates flow through bus as "btc_price" events
 """
 
 import json
@@ -42,6 +47,7 @@ class BtcPriceFeed:
     price: float = 0.0
     updated_at: float = 0.0
     connected: bool = False
+    bus: object | None = field(default=None, repr=False)  # EventBus (optional)
     _ws: websocket.WebSocketApp | None = field(default=None, repr=False)
     _thread: threading.Thread | None = field(default=None, repr=False)
     _stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -126,7 +132,17 @@ class BtcPriceFeed:
             # Use close price of current candle as latest price
             close_price = float(kline.get("c", 0))
             if close_price > 0:
+                prev_price = self.price
                 self.price = close_price
                 self.updated_at = time.time()
+
+                # Emit event on bus if connected (event-driven mode)
+                if self.bus is not None and prev_price > 0:
+                    change_pct = ((close_price - prev_price) / prev_price) * 100
+                    self.bus.emit("btc_price", {
+                        "price": close_price,
+                        "prev_price": prev_price,
+                        "change_pct": change_pct,
+                    })
         except (json.JSONDecodeError, ValueError, KeyError):
             pass

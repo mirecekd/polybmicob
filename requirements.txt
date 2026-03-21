@@ -19,4 +19,5 @@ py-builder-signing-sdk>=0.0.2
 python-dotenv>=1.0.0
 
 # WebSocket client for real-time Binance BTC price feed
+# Provides websocket.WebSocketApp for Binance + Polymarket WS feeds
 websocket-client>=1.7.0
