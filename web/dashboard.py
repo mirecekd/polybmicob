@@ -754,6 +754,25 @@ def render_mm_html() -> str:
 
     today_pnl_color = "#3fb950" if t["total_pnl"] >= 0 else "#f85149"
     all_pnl_color = "#3fb950" if a["total_pnl"] >= 0 else "#f85149"
+
+    # Compute today's hourly rate
+    today_first_ts = None
+    for tr in mm.get("mm_trades", []):
+        if tr.get("timestamp", "").startswith(datetime.now(timezone.utc).strftime("%Y-%m-%d")):
+            today_first_ts = tr.get("timestamp")
+            break
+    if today_first_ts and t["total_pairs"] > 0:
+        try:
+            first_dt = datetime.fromisoformat(today_first_ts)
+            hours_active = max((datetime.now(timezone.utc) - first_dt).total_seconds() / 3600, 0.1)
+            hourly_rate = t["total_pnl"] / hours_active
+        except (ValueError, TypeError):
+            hours_active = 0
+            hourly_rate = 0
+    else:
+        hours_active = 0
+        hourly_rate = 0
+    hourly_color = "#3fb950" if hourly_rate >= 0 else "#f85149"
     fill_rate_color = "#3fb950" if a["fill_rate"] >= 0.5 else "#d29922" if a["fill_rate"] >= 0.2 else "#f85149"
     spread_color = "#3fb950" if a["avg_spread"] > 0.01 else "#d29922"
 
@@ -869,7 +888,7 @@ def render_mm_html() -> str:
   <div class="hero-card">
     <div class="num" style="color:{today_pnl_color}">${t['total_pnl']:+.2f}</div>
     <div class="lbl">Today MM P&L</div>
-    <div class="detail">{t['total_pairs']} pairs ({t['both_filled']} arb, {t['completed']} complete, {t['partials']} partial)</div>
+    <div class="detail">{t['total_pairs']} pairs | <span style="color:{hourly_color}">${hourly_rate:+.2f}/h</span> ({hours_active:.1f}h active)</div>
   </div>
   <div class="hero-card">
     <div class="num" style="color:{all_pnl_color}">${a['total_pnl']:+.2f}</div>
