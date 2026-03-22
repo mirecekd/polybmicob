@@ -868,11 +868,6 @@ def place_mm_pair(
                 maker_price = round(best_ask - 0.01, 2)
             maker_price = max(maker_price, 0.02)
 
-            # Only bid if price < $0.50 (ensures pair cost < $1.00)
-            if maker_price > 0.50:
-                log.info("  MM: %s bid $%.2f > $0.50, skipping (no arb edge)", label, maker_price)
-                continue
-
             size = round(size_usd / maker_price, 0)
             if size < min_order_size:
                 size = min_order_size
