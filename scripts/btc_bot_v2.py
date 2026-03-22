@@ -270,6 +270,9 @@ def handle_market_tick(event_type: str, data: dict) -> None:
             # Directional trading on top (only during trading hours, only if MM didn't fill)
             _handle_pre_market(slug, slot_ts)
     elif phase == "in_play":
+        # At market start: try to complete MM pairs (buy missing side)
+        if MM_PAIR_ENABLED:
+            _complete_mm_pair(slug)
         _handle_in_play(slug, slot_ts)
     elif phase == "mid_play":
         _handle_in_play(slug, slot_ts)  # same logic, second check
@@ -453,6 +456,136 @@ def _handle_pre_market(slug: str, slot_ts: int) -> None:
         })
 
         time.sleep(RATE_LIMIT_SEC)
+
+
+def _complete_mm_pair(slug: str) -> None:
+    """
+    At market start: if we have only one side of an MM pair, buy the other via FOK.
+
+    This converts a 50/50 directional bet into a guaranteed arb profit.
+    Only buys if pair_cost < $1.00 (otherwise leave as directional).
+    """
+    import json as _json
+
+    trades = load_trades()
+    # Find mm-pair trades for this slug that aren't hedged yet
+    mm_trades = [
+        t for t in trades
+        if t.get("slug") == slug
+        and t.get("mode", "").startswith("mm-pair")
+        and not t.get("hedged")
+        and not t.get("resolved")
+        and not t.get("dry_run", True)
+    ]
+
+    if not mm_trades:
+        return
+
+    for trade in mm_trades:
+        direction = trade.get("direction", "")
+        entry_price = trade.get("exec_price") or trade.get("entry_price", 0.50)
+
+        # Get market token IDs
+        try:
+            resp = httpx.get(
+                "https://gamma-api.polymarket.com/events",
+                params={"slug": slug},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                continue
+            mkt = data[0].get("markets", [{}])[0]
+            token_ids_raw = mkt.get("clobTokenIds")
+            if isinstance(token_ids_raw, str):
+                token_ids = _json.loads(token_ids_raw)
+            else:
+                token_ids = token_ids_raw or []
+            if len(token_ids) < 2:
+                continue
+        except Exception:
+            continue
+
+        # Determine opposite side
+        if direction == "down":
+            opp_token = token_ids[0]  # UP
+            opp_dir = "UP"
+        else:
+            opp_token = token_ids[1]  # DOWN
+            opp_dir = "DOWN"
+
+        # Check if we already hold opposite (both sides filled = arb complete!)
+        from scripts.btc_bot import _check_position_exists, _mark_trade_hedged
+        if _check_position_exists(opp_token):
+            log.info("  PAIR COMPLETE: already hold both sides of %s (arb locked!)", slug)
+            _mark_trade_hedged(slug, opp_token, 0, 0, entry_price)
+            continue
+
+        # Get opposite orderbook
+        try:
+            book_resp = httpx.get(
+                f"{CLOB_HOST}/book",
+                params={"token_id": opp_token},
+                timeout=10,
+            )
+            book_resp.raise_for_status()
+            book = book_resp.json()
+            asks = sorted(book.get("asks", []), key=lambda a: float(a["price"]))
+            if not asks:
+                continue
+            opp_best_ask = float(asks[0]["price"])
+        except Exception:
+            continue
+
+        pair_cost = entry_price + opp_best_ask
+        if pair_cost >= 1.00:
+            log.info("  PAIR SKIP: %s pair_cost $%.2f >= $1.00 (no arb edge)", slug, pair_cost)
+            continue
+
+        # Buy opposite side via FOK
+        opp_exec = round(min(opp_best_ask + 0.01, 0.95), 2)
+        min_order = int(book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+        shares = trade.get("shares", 5)
+        shares = max(shares, min_order, math.ceil(1.00 / opp_exec))
+
+        locked_profit = (1.00 - pair_cost) * shares
+        log.info(
+            "  PAIR COMPLETE: buy %s on %s @ $%.2f (pair_cost $%.2f, locked profit $%.2f)",
+            opp_dir, slug, opp_exec, pair_cost, locked_profit,
+        )
+
+        if dry_run:
+            _mark_trade_hedged(slug, opp_token, opp_exec, shares, pair_cost)
+            continue
+
+        try:
+            client = get_clob_client()
+            order_args = OrderArgs(
+                price=opp_exec, size=shares, side=BUY, token_id=opp_token,
+            )
+            signed = client.create_order(order_args)
+            result = client.post_order(signed, OrderType.FOK)
+            status = result.get("status", "")
+            if status == "MATCHED" or result.get("success"):
+                log.info("  PAIR COMPLETE FILLED: %s %s @ $%.2f -> guaranteed profit $%.2f",
+                         opp_dir, slug, opp_exec, locked_profit)
+                _mark_trade_hedged(slug, opp_token, opp_exec, shares, pair_cost)
+                record_order_filled()
+                save_trade({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "slug": slug, "direction": opp_dir.lower(),
+                    "token_id": opp_token, "entry_price": opp_best_ask,
+                    "shares": shares, "exec_price": opp_exec,
+                    "edge": 0, "confidence": 1.0,
+                    "reason": f"MM-pair completion (pair_cost=${pair_cost:.2f}, profit=${locked_profit:.2f})",
+                    "order_id": result.get("orderID", "unknown"),
+                    "dry_run": False, "mode": "mm-pair-complete",
+                })
+            else:
+                log.info("  PAIR COMPLETE: %s FOK not filled (price moved)", opp_dir)
+        except Exception as exc:
+            log.debug("  PAIR COMPLETE failed: %s", exc)
 
 
 def _handle_mm_only(slug: str, slot_ts: int) -> None:
