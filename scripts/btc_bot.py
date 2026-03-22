@@ -986,17 +986,13 @@ def place_mm_pair(
                 direction = "up" if winner_label == "UP" else "down"
 
                 log.info(
-                    "  MM %s FILLED after %ds! Cancelling %s order...",
+                    "  MM %s FILLED after %ds! Keeping %s order alive (arb: both sides = guaranteed profit)",
                     winner_label, elapsed, loser_label,
                 )
 
-                # Cancel the other side
-                if loser_label in order_ids:
-                    try:
-                        client.cancel(order_ids[loser_label])
-                        log.info("  MM: %s order cancelled", loser_label)
-                    except Exception as exc:
-                        log.warning("  MM: cancel %s failed: %s", loser_label, exc)
+                # DON'T cancel the other side - let it fill too for arb profit
+                # If both fill: pair_cost < $1.00 = guaranteed profit regardless of outcome
+                # If only one fills: we become directional at maker price ($0 fee)
 
                 record_order_filled()
                 return {
