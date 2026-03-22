@@ -135,6 +135,7 @@ MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 
 BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
 MAX_VOL_5M = float(os.environ.get("MAX_VOL_5M", "0.12"))  # max 5-min vol % (0=disabled, 0.12=default)
+MM_PAIR_ENABLED = os.environ.get("MM_PAIR_ENABLED", "false").lower() == "true"
 
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
 FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
@@ -392,7 +393,29 @@ def _handle_pre_market(slug: str, slot_ts: int) -> None:
 
         result = None
         trade_mode = "pre-market"
-        if MAKER_MODE_ENABLED:
+        if MM_PAIR_ENABLED:
+            # Two-sided MM: bid both UP and DOWN, profit from spread
+            log.info("    Using MM PAIR mode (bid both sides, timeout=%ds)", MAKER_TIMEOUT_SEC)
+            mm_result = place_mm_pair(
+                client, mkt.up_token_id, mkt.down_token_id,
+                MAX_TRADE_USD, mkt.slug,
+                timeout_sec=MAKER_TIMEOUT_SEC, dry_run=dry_run,
+            )
+            if mm_result and mm_result.get("filled"):
+                # MM pair filled one side - use that as our trade
+                result = mm_result
+                trade_mode = "mm-pair"
+                # Override signal direction/token with what actually filled
+                sig = TradeSignal(
+                    direction=mm_result["direction"],
+                    token_id=mm_result["token_id"],
+                    entry_price=mm_result["exec_price"],
+                    edge=sig.edge,
+                    confidence=sig.confidence,
+                    reason=f"MM-pair fill (pair_cost=${mm_result.get('pair_cost', 0):.2f}) {sig.reason}",
+                    market_slug=mkt.slug,
+                )
+        elif MAKER_MODE_ENABLED:
             result = place_maker_trade(client, sig, MAX_TRADE_USD, timeout_sec=MAKER_TIMEOUT_SEC, dry_run=dry_run)
             trade_mode = "pre-market-maker"
         else:
@@ -767,6 +790,10 @@ def main() -> None:
         log.info("Volatility filter: ENABLED (max 5m vol %.2f%%, skip choppy markets)", MAX_VOL_5M)
     else:
         log.info("Volatility filter: disabled")
+    if MM_PAIR_ENABLED:
+        log.info("MM Pair: ENABLED (bid both UP+DOWN, profit from spread, $0 maker fee)")
+    else:
+        log.info("MM Pair: disabled (directional trading only)")
     if HEDGE_ENABLED:
         log.info(
             "Hedge: ENABLED (max_price=$%.2f, window=%ds)",
