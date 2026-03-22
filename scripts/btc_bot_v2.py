@@ -134,6 +134,7 @@ MAKER_MODE_ENABLED = os.environ.get("MAKER_MODE_ENABLED", "false").lower() == "t
 MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 
 BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
+MAX_VOL_5M = float(os.environ.get("MAX_VOL_5M", "0.12"))  # max 5-min vol % (0=disabled, 0.12=default)
 
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
 FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
@@ -295,6 +296,19 @@ def _handle_pre_market(slug: str, slot_ts: int) -> None:
         log.info("  Momentum %.3f%% < %.2f%% threshold, skipping.", snapshot.momentum_5m, MIN_MOMENTUM_PCT)
         record_momentum_skip()
         return
+
+    # Volatility filter (ATR proxy) - skip when BTC is too choppy
+    # High vol = high reversal probability = bad for momentum trades
+    if MAX_VOL_5M > 0:
+        from lib.bs_fair_value import compute_realized_volatility, SECONDS_PER_YEAR
+        sigma_annual = compute_realized_volatility()
+        if sigma_annual is not None:
+            import math
+            sigma_5m = sigma_annual * math.sqrt(300.0 / SECONDS_PER_YEAR) * 100  # as percent
+            if sigma_5m > MAX_VOL_5M:
+                log.info("  Vol %.3f%% > %.2f%% threshold, skipping (too choppy).", sigma_5m, MAX_VOL_5M)
+                return
+            log.info("  Vol check OK: %.3f%% <= %.2f%%", sigma_5m, MAX_VOL_5M)
 
     # Scan Gamma API for this specific market
     try:
@@ -748,6 +762,10 @@ def main() -> None:
         log.info("Black-Scholes: ENABLED (realized vol from 30x1m klines)")
     else:
         log.info("Black-Scholes: disabled (heuristic momentum)")
+    if MAX_VOL_5M > 0:
+        log.info("Volatility filter: ENABLED (max 5m vol %.2f%%, skip choppy markets)", MAX_VOL_5M)
+    else:
+        log.info("Volatility filter: disabled")
     if HEDGE_ENABLED:
         log.info(
             "Hedge: ENABLED (max_price=$%.2f, window=%ds)",
