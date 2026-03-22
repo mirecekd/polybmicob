@@ -263,11 +263,12 @@ def handle_market_tick(event_type: str, data: dict) -> None:
         return
 
     if phase == "pre_market":
-        if in_trading_hours:
-            _handle_pre_market(slug, slot_ts)
-        elif MM_PAIR_ENABLED:
-            # Off-hours: only MM pair (no directional)
+        if MM_PAIR_ENABLED:
+            # MM pair always runs first (24/7, no filters needed)
             _handle_mm_only(slug, slot_ts)
+        if in_trading_hours and slug not in traded_slugs:
+            # Directional trading on top (only during trading hours, only if MM didn't fill)
+            _handle_pre_market(slug, slot_ts)
     elif phase == "in_play":
         _handle_in_play(slug, slot_ts)
     elif phase == "mid_play":
