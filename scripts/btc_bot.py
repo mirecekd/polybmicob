@@ -975,37 +975,40 @@ def place_mm_pair(
 
         time.sleep(poll_interval)
 
-        # Check each side for fill
+        # Check each side for fill - track which sides filled
+        filled_sides = set()
         for side in sides:
             if side["label"] not in order_ids:
                 continue
+            if side["label"] in filled_sides:
+                continue
             if _check_position_exists(side["token_id"]):
-                elapsed = int(time.time() - start_time)
-                winner_label = side["label"]
-                loser_label = "DOWN" if winner_label == "UP" else "UP"
-                direction = "up" if winner_label == "UP" else "down"
+                if side["label"] not in filled_sides:
+                    filled_sides.add(side["label"])
+                    elapsed = int(time.time() - start_time)
+                    log.info("  MM %s FILLED after %ds!", side["label"], elapsed)
+                    record_order_filled()
 
-                log.info(
-                    "  MM %s FILLED after %ds! Keeping %s order alive (arb: both sides = guaranteed profit)",
-                    winner_label, elapsed, loser_label,
-                )
+        # Both sides filled = ARB LOCKED! Return immediately
+        if len(filled_sides) == 2:
+            elapsed = int(time.time() - start_time)
+            log.info("  MM BOTH SIDES FILLED! Arb locked (pair_cost $%.2f, profit $%.2f)", pair_cost, 1.00 - pair_cost)
+            winner = sides[0]  # return first side as the "trade"
+            return {
+                "orderID": order_ids.get(winner["label"], "both"),
+                "filled": True,
+                "size": winner["size"],
+                "exec_price": winner["maker_price"],
+                "mode": "mm-pair-arb",
+                "direction": "up" if winner["label"] == "UP" else "down",
+                "token_id": winner["token_id"],
+                "pair_cost": pair_cost,
+                "wait_sec": elapsed,
+                "both_filled": True,
+            }
 
-                # DON'T cancel the other side - let it fill too for arb profit
-                # If both fill: pair_cost < $1.00 = guaranteed profit regardless of outcome
-                # If only one fills: we become directional at maker price ($0 fee)
-
-                record_order_filled()
-                return {
-                    "orderID": order_ids[winner_label],
-                    "filled": True,
-                    "size": side["size"],
-                    "exec_price": side["maker_price"],
-                    "mode": "mm-pair",
-                    "direction": direction,
-                    "token_id": side["token_id"],
-                    "pair_cost": pair_cost,
-                    "wait_sec": elapsed,
-                }
+        # One side filled - keep waiting for the other (don't return yet!)
+        # Only return after timeout if second side never fills
 
         # Progress log
         elapsed = int(time.time() - start_time)
