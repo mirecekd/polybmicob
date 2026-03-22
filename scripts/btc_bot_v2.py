@@ -250,7 +250,9 @@ def handle_market_tick(event_type: str, data: dict) -> None:
 
     # Hour-of-day filter
     current_hour = datetime.now(timezone.utc).hour
-    if TRADING_HOURS is not None and current_hour not in TRADING_HOURS:
+    in_trading_hours = TRADING_HOURS is None or current_hour in TRADING_HOURS
+
+    if not in_trading_hours and not MM_PAIR_ENABLED:
         log.info("Hour %02d UTC not in trading hours, skipping.", current_hour)
         return
 
@@ -261,7 +263,11 @@ def handle_market_tick(event_type: str, data: dict) -> None:
         return
 
     if phase == "pre_market":
-        _handle_pre_market(slug, slot_ts)
+        if in_trading_hours:
+            _handle_pre_market(slug, slot_ts)
+        elif MM_PAIR_ENABLED:
+            # Off-hours: only MM pair (no directional)
+            _handle_mm_only(slug, slot_ts)
     elif phase == "in_play":
         _handle_in_play(slug, slot_ts)
     elif phase == "mid_play":
@@ -445,6 +451,75 @@ def _handle_pre_market(slug: str, slot_ts: int) -> None:
             "mode": trade_mode,
         })
 
+        time.sleep(RATE_LIMIT_SEC)
+
+
+def _handle_mm_only(slug: str, slot_ts: int) -> None:
+    """Off-hours MM pair: bid both sides without directional signal. Runs 24/7."""
+    if slug in traded_slugs:
+        return
+
+    if daily_loss_usd >= MAX_DAILY_LOSS_USD:
+        return
+
+    current_hour = datetime.now(timezone.utc).hour
+    log.info("  MM-only mode (hour %02d, off-hours)", current_hour)
+
+    try:
+        markets = scan_btc_5m_markets(SCAN_MIN_MINUTES, SCAN_MAX_MINUTES)
+    except Exception as exc:
+        log.warning("  MM-only: scanner failed: %s", exc)
+        return
+
+    if not markets:
+        return
+
+    client = None
+    for mkt in markets:
+        if shutdown_requested:
+            return
+        if mkt.slug in traded_slugs:
+            continue
+        if mkt.liquidity < 500:
+            continue
+
+        if client is None:
+            try:
+                client = get_clob_client()
+            except Exception as exc:
+                log.error("CLOB client init failed: %s", exc)
+                return
+
+        traded_slugs.add(mkt.slug)
+        result = place_mm_pair(
+            client, mkt.up_token_id, mkt.down_token_id,
+            MAX_TRADE_USD, mkt.slug,
+            timeout_sec=MAKER_TIMEOUT_SEC, dry_run=dry_run,
+        )
+
+        if result is None or not result.get("filled"):
+            traded_slugs.discard(mkt.slug)
+            continue
+
+        order_id = result.get("orderID", "unknown")
+        save_trade({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "slug": mkt.slug,
+            "direction": result["direction"],
+            "token_id": result["token_id"],
+            "entry_price": result["exec_price"],
+            "shares": int(result.get("size", 5)),
+            "exec_price": result["exec_price"],
+            "edge": 0,
+            "confidence": 0.50,
+            "reason": f"MM-pair off-hours (pair_cost=${result.get('pair_cost', 0):.2f})",
+            "order_id": order_id,
+            "dry_run": dry_run,
+            "btc_price": btc_feed.price if btc_feed else 0,
+            "momentum": 0,
+            "mode": "mm-pair-offhours",
+        })
+        log.info("  MM-only FILLED: %s on %s @ $%.2f", result["direction"].upper(), mkt.slug, result["exec_price"])
         time.sleep(RATE_LIMIT_SEC)
 
 
