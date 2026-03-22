@@ -105,13 +105,20 @@ class EventBus:
             if handler in handlers:
                 handlers.remove(handler)
 
+    def has_handlers(self, event_type: str) -> bool:
+        """Check if any handlers are registered for an event type."""
+        with self._lock:
+            return bool(self._handlers.get(event_type))
+
     def emit(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         """
         Emit an event (thread-safe).
 
         Can be called from any thread. Event is queued for processing
-        in the main dispatch loop.
+        in the main dispatch loop. Silently skips if no handlers registered.
         """
+        if not self.has_handlers(event_type):
+            return
         event = Event(event_type=event_type, data=data or {})
         try:
             self._queue.put_nowait(event)
