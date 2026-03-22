@@ -1015,14 +1015,41 @@ def place_mm_pair(
         if elapsed % 15 < poll_interval:
             log.info("  MM: waiting for fill... %ds/%ds", elapsed, timeout_sec)
 
-    # Timeout - cancel both
-    log.info("  MM TIMEOUT: no fill after %ds, cancelling both", timeout_sec)
-    for label, oid in order_ids.items():
-        try:
-            client.cancel(oid)
-        except Exception:
-            pass
+    # Timeout - check what filled
+    # Cancel unfilled orders, but return result if one side filled
+    for side in sides:
+        if side["label"] in filled_sides:
+            continue  # already filled, can't cancel
+        if side["label"] in order_ids:
+            try:
+                client.cancel(order_ids[side["label"]])
+                log.info("  MM: cancelled unfilled %s order", side["label"])
+            except Exception:
+                pass
 
+    if filled_sides:
+        # One side filled but not both - return it so _complete_mm_pair can finish
+        winner = [s for s in sides if s["label"] in filled_sides][0]
+        direction = "up" if winner["label"] == "UP" else "down"
+        elapsed = int(time.time() - start_time)
+        log.info(
+            "  MM PARTIAL: only %s filled after %ds (waiting for _complete_mm_pair at market start)",
+            winner["label"], elapsed,
+        )
+        return {
+            "orderID": order_ids.get(winner["label"], "partial"),
+            "filled": True,
+            "size": winner["size"],
+            "exec_price": winner["maker_price"],
+            "mode": "mm-pair",
+            "direction": direction,
+            "token_id": winner["token_id"],
+            "pair_cost": pair_cost,
+            "wait_sec": elapsed,
+            "both_filled": False,
+        }
+
+    log.info("  MM TIMEOUT: no fill after %ds", timeout_sec)
     record_order_rejected("mm_timeout", f"No fill in {timeout_sec}s")
     return None
 
