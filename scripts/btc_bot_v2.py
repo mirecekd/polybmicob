@@ -594,8 +594,9 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
     if slug in traded_slugs:
         return
 
-    if daily_loss_usd >= MAX_DAILY_LOSS_USD:
-        return
+    # NOTE: MM pair does NOT check daily_loss or consec_losses
+    # MM arb (both fill) has zero directional risk, partials are 50/50
+    # These limits are for directional trading only
 
     # Fresh balance check before every MM pair (RPC call, ~200ms)
     min_needed = max(MAX_TRADE_USD * 2, 10.00)  # at least $10 to safely play both sides + buffer
