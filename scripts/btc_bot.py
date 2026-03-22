@@ -855,15 +855,18 @@ def place_mm_pair(
             bids = sorted(raw_book.get("bids", []), key=lambda b: float(b["price"]), reverse=True)
             asks = sorted(raw_book.get("asks", []), key=lambda a: float(a["price"]))
 
-            if not asks:
-                log.info("  MM: no asks on %s orderbook, skipping", label)
+            if not bids:
+                log.info("  MM: no bids on %s orderbook, skipping", label)
                 continue
 
-            best_ask = float(asks[0]["price"])
-            best_bid = float(bids[0]["price"]) if bids else 0.01
+            best_ask = float(asks[0]["price"]) if asks else 0.99
+            best_bid = float(bids[0]["price"])
 
-            # Maker price: best bid + $0.01
-            maker_price = round(best_bid + 0.01, 2)
+            # Maker price: place AT best_bid (sit on the book, fill when someone sells)
+            # Don't add $0.01 - that pushes towards ask and causes post-only rejects
+            maker_price = best_bid
+
+            # Safety: must be below best ask for post-only to work
             if maker_price >= best_ask:
                 maker_price = round(best_ask - 0.01, 2)
             maker_price = max(maker_price, 0.02)
@@ -889,16 +892,35 @@ def place_mm_pair(
 
     pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
     pair_profit = 1.00 - pair_cost
+
+    # If pair_cost >= $1.00, reduce prices to guarantee profit if both fill
+    # Reduce the more expensive side first (more room to drop)
+    if pair_cost >= 1.00:
+        # Target: pair_cost = $0.98 (leaves $0.02 profit margin)
+        target_pair = 0.98
+        excess = pair_cost - target_pair
+        # Split reduction across both sides (reduce more expensive side more)
+        for _ in range(10):  # max 10 iterations
+            if pair_cost < 1.00:
+                break
+            # Reduce more expensive side by $0.01
+            expensive = max(sides, key=lambda s: s["maker_price"])
+            expensive["maker_price"] = round(expensive["maker_price"] - 0.01, 2)
+            pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
+
+    pair_profit = 1.00 - pair_cost
+
+    # Absolute minimum: each side must be at least $0.02
+    if any(s["maker_price"] < 0.02 for s in sides):
+        log.info("  MM: prices too low after adjustment, aborting")
+        return None
+
     log.info(
         "  MM PAIR: %s bid=$%.2f + %s bid=$%.2f = $%.2f (profit=$%.2f if both fill)",
         sides[0]["label"], sides[0]["maker_price"],
         sides[1]["label"], sides[1]["maker_price"],
         pair_cost, pair_profit,
     )
-
-    if pair_cost >= 1.00:
-        log.info("  MM: pair cost $%.2f >= $1.00, no arb edge, aborting", pair_cost)
-        return None
 
     if dry_run:
         # In dry-run, simulate the more likely fill (the cheaper side)
