@@ -136,6 +136,7 @@ MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
 MAX_VOL_5M = float(os.environ.get("MAX_VOL_5M", "0.12"))  # max 5-min vol % (0=disabled, 0.12=default)
 MM_PAIR_ENABLED = os.environ.get("MM_PAIR_ENABLED", "false").lower() == "true"
+MM_PAIR_REDEEM_SEC = int(os.environ.get("MM_PAIR_REDEEM_SEC", "120"))
 
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
 FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
@@ -1081,7 +1082,9 @@ def main() -> None:
 
     # ── 6. Schedule periodic tasks ────────────────────────────
     bus.schedule(interval_sec=30, handler=_scheduled_resolve, name="resolve_trades")
-    bus.schedule(interval_sec=300, handler=_scheduled_claim, name="claim_winnings")
+    claim_interval = MM_PAIR_REDEEM_SEC if MM_PAIR_ENABLED else 300
+    log.info("Claim interval: %ds%s", claim_interval, " (MM_PAIR_REDEEM_SEC)" if MM_PAIR_ENABLED else "")
+    bus.schedule(interval_sec=claim_interval, handler=_scheduled_claim, name="claim_winnings")
     if EARLY_EXIT_ENABLED:
         bus.schedule(interval_sec=10, handler=_scheduled_early_exit, name="early_exit")
 
