@@ -207,6 +207,7 @@ dry_run: bool = True
 # Import trading functions from v1 to avoid duplication
 from scripts.btc_bot import (
     get_clob_client,
+    get_fresh_balance,
     load_trades,
     save_trade,
     get_orderbook_signal,
@@ -596,10 +597,10 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
     if daily_loss_usd >= MAX_DAILY_LOSS_USD:
         return
 
-    # Balance check: need enough for both sides + buffer for pending trades
-    # Min order is ~5 shares * $0.50 = $2.50/side, so ~$5 min + buffer for resolution wait
+    # Fresh balance check before every MM pair (RPC call, ~200ms)
     min_needed = max(MAX_TRADE_USD * 2, 10.00)  # at least $10 to safely play both sides + buffer
-    wallet = load_wallet_balance().get("usdc_balance", 0)
+    wallet = get_fresh_balance()
+    log.info("  MM: wallet $%.2f (fresh RPC check)", wallet)
     if wallet < min_needed:
         log.info("  MM: insufficient balance $%.2f < $%.2f needed for both sides, skipping", wallet, min_needed)
         return

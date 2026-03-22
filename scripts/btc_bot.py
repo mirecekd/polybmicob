@@ -330,6 +330,47 @@ def get_clob_client() -> ClobClient:
 
 
 # ──────────────────────────────────────────────────────────────
+# Fresh wallet balance (RPC call, ~200ms)
+# ──────────────────────────────────────────────────────────────
+
+
+def get_fresh_balance() -> float:
+    """
+    Get fresh USDC balance from Polygon RPC (not cached).
+
+    Single eth_call, ~200ms latency. Use before every trade to ensure
+    we have enough balance. Also updates the stats cache for dashboard.
+
+    Returns USDC balance as float, or 0.0 on error.
+    """
+    if not FUNDER:
+        return 0.0
+    try:
+        usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        addr_padded = FUNDER[2:].lower().zfill(64)
+        call_data = f"0x70a08231{addr_padded}"
+        resp = httpx.post(
+            RPC_URL,
+            json={
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": usdc_contract, "data": call_data}, "latest"],
+                "id": 1,
+            },
+            timeout=10,
+        )
+        hex_balance = resp.json().get("result", "0x0")
+        balance = int(hex_balance, 16) / 1e6
+        # Update stats cache so dashboard stays fresh too
+        record_wallet_balance(balance)
+        return balance
+    except Exception as exc:
+        log.debug("Fresh balance check failed: %s", exc)
+        # Fallback to cached value
+        return load_wallet_balance().get("usdc_balance", 0.0)
+
+
+# ──────────────────────────────────────────────────────────────
 # Trade logging
 # ──────────────────────────────────────────────────────────────
 
