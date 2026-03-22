@@ -622,7 +622,9 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
             return
         if mkt.slug in traded_slugs:
             continue
-        if mkt.liquidity < 500:
+        # MM pair needs higher liquidity than directional (both sides must fill)
+        if mkt.liquidity < 1000:
+            log.info("  MM: %s liquidity $%.0f < $1000, skipping (need both sides to fill)", mkt.slug, mkt.liquidity)
             continue
 
         if client is None:
