@@ -275,9 +275,11 @@ def handle_market_tick(event_type: str, data: dict) -> None:
         # At market start: try to complete MM pairs (buy missing side)
         if MM_PAIR_ENABLED:
             _complete_mm_pair(slug)
-        _handle_in_play(slug, slot_ts)
+        if in_trading_hours:
+            _handle_in_play(slug, slot_ts)
     elif phase == "mid_play":
-        _handle_in_play(slug, slot_ts)  # same logic, second check
+        if in_trading_hours:
+            _handle_in_play(slug, slot_ts)  # same logic, second check
     elif phase == "ending":
         _handle_ending(slug, slot_ts)
 
