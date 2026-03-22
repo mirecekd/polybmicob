@@ -211,6 +211,7 @@ from scripts.btc_bot import (
     get_orderbook_signal,
     place_trade,
     place_maker_trade,
+    place_mm_pair,
     place_sell_order,
     restore_state_from_trades,
     _update_risk_state,

@@ -815,6 +815,225 @@ def place_maker_trade(
 
 
 # ──────────────────────────────────────────────────────────────
+# Two-sided Market Making (MM pair)
+# ──────────────────────────────────────────────────────────────
+
+
+def place_mm_pair(
+    client: ClobClient,
+    up_token_id: str,
+    down_token_id: str,
+    size_usd: float,
+    market_slug: str,
+    timeout_sec: int = 120,
+    dry_run: bool = False,
+) -> dict | None:
+    """
+    Place GTC post-only bids on BOTH UP and DOWN tokens simultaneously.
+
+    Market making strategy: earn spread by buying both sides below $0.50.
+    If UP_bid + DOWN_bid < $1.00, we have guaranteed profit regardless of outcome.
+    When one side fills, cancel the other (we become directional at that point).
+
+    The key insight: we don't need to predict direction. We just need one side
+    to fill at a good price. $0 maker fee means all spread is profit.
+
+    Returns result dict for the side that filled, or None if neither fills.
+    """
+    sides = []
+    for label, token_id in [("UP", up_token_id), ("DOWN", down_token_id)]:
+        try:
+            raw_resp = httpx.get(
+                f"{CLOB_HOST}/book",
+                params={"token_id": token_id},
+                timeout=15,
+            )
+            raw_resp.raise_for_status()
+            raw_book = raw_resp.json()
+
+            min_order_size = int(raw_book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+            bids = sorted(raw_book.get("bids", []), key=lambda b: float(b["price"]), reverse=True)
+            asks = sorted(raw_book.get("asks", []), key=lambda a: float(a["price"]))
+
+            if not asks:
+                log.info("  MM: no asks on %s orderbook, skipping", label)
+                continue
+
+            best_ask = float(asks[0]["price"])
+            best_bid = float(bids[0]["price"]) if bids else 0.01
+
+            # Maker price: best bid + $0.01
+            maker_price = round(best_bid + 0.01, 2)
+            if maker_price >= best_ask:
+                maker_price = round(best_ask - 0.01, 2)
+            maker_price = max(maker_price, 0.02)
+
+            # Only bid if price < $0.50 (ensures pair cost < $1.00)
+            if maker_price > 0.50:
+                log.info("  MM: %s bid $%.2f > $0.50, skipping (no arb edge)", label, maker_price)
+                continue
+
+            size = round(size_usd / maker_price, 0)
+            if size < min_order_size:
+                size = min_order_size
+
+            sides.append({
+                "label": label,
+                "token_id": token_id,
+                "maker_price": maker_price,
+                "size": size,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+            })
+        except Exception as exc:
+            log.warning("  MM: failed to fetch %s orderbook: %s", label, exc)
+
+    if len(sides) < 2:
+        log.info("  MM: need both sides, only got %d, aborting", len(sides))
+        return None
+
+    pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
+    pair_profit = 1.00 - pair_cost
+    log.info(
+        "  MM PAIR: %s bid=$%.2f + %s bid=$%.2f = $%.2f (profit=$%.2f if both fill)",
+        sides[0]["label"], sides[0]["maker_price"],
+        sides[1]["label"], sides[1]["maker_price"],
+        pair_cost, pair_profit,
+    )
+
+    if pair_cost >= 1.00:
+        log.info("  MM: pair cost $%.2f >= $1.00, no arb edge, aborting", pair_cost)
+        return None
+
+    if dry_run:
+        # In dry-run, simulate the more likely fill (the cheaper side)
+        winner = min(sides, key=lambda s: s["maker_price"])
+        direction = "up" if winner["label"] == "UP" else "down"
+        log.info("  MM DRY-RUN: simulating %s fill @ $%.2f", winner["label"], winner["maker_price"])
+        return {
+            "orderID": "dry-run-mm-pair",
+            "filled": True,
+            "size": winner["size"],
+            "exec_price": winner["maker_price"],
+            "mode": "mm-pair",
+            "direction": direction,
+            "token_id": winner["token_id"],
+            "pair_cost": pair_cost,
+        }
+
+    # Place both orders
+    order_ids = {}
+    for side in sides:
+        try:
+            order_args = OrderArgs(
+                price=side["maker_price"],
+                size=side["size"],
+                side=BUY,
+                token_id=side["token_id"],
+            )
+            signed = client.create_order(order_args)
+            result = client.post_order(signed, OrderType.GTC, post_only=True)
+            oid = result.get("orderID", result.get("id", ""))
+            if oid:
+                order_ids[side["label"]] = oid
+                log.info(
+                    "  MM %s ORDER PLACED: %s (%.0f shares @ $%.2f)",
+                    side["label"], oid, side["size"], side["maker_price"],
+                )
+            else:
+                log.warning("  MM: no order ID for %s", side["label"])
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "post only" in err_msg or "would match" in err_msg:
+                log.info("  MM: %s post-only rejected (spread too tight)", side["label"])
+            else:
+                log.warning("  MM: %s order failed: %s", side["label"], exc)
+
+    if not order_ids:
+        log.info("  MM: no orders placed, aborting")
+        return None
+
+    if len(order_ids) == 1:
+        # Only one side placed - cancel it and abort (we want both or nothing)
+        for label, oid in order_ids.items():
+            log.info("  MM: only %s placed, cancelling (need both sides)", label)
+            try:
+                client.cancel(oid)
+            except Exception:
+                pass
+        return None
+
+    log.info("  MM: both orders placed, monitoring for fill...")
+
+    # Monitor both orders - when one fills, cancel the other
+    start_time = time.time()
+    poll_interval = 3  # faster polling for MM (time-sensitive)
+
+    while time.time() - start_time < timeout_sec:
+        if shutdown_requested:
+            for label, oid in order_ids.items():
+                try:
+                    client.cancel(oid)
+                except Exception:
+                    pass
+            return None
+
+        time.sleep(poll_interval)
+
+        # Check each side for fill
+        for side in sides:
+            if side["label"] not in order_ids:
+                continue
+            if _check_position_exists(side["token_id"]):
+                elapsed = int(time.time() - start_time)
+                winner_label = side["label"]
+                loser_label = "DOWN" if winner_label == "UP" else "UP"
+                direction = "up" if winner_label == "UP" else "down"
+
+                log.info(
+                    "  MM %s FILLED after %ds! Cancelling %s order...",
+                    winner_label, elapsed, loser_label,
+                )
+
+                # Cancel the other side
+                if loser_label in order_ids:
+                    try:
+                        client.cancel(order_ids[loser_label])
+                        log.info("  MM: %s order cancelled", loser_label)
+                    except Exception as exc:
+                        log.warning("  MM: cancel %s failed: %s", loser_label, exc)
+
+                record_order_filled()
+                return {
+                    "orderID": order_ids[winner_label],
+                    "filled": True,
+                    "size": side["size"],
+                    "exec_price": side["maker_price"],
+                    "mode": "mm-pair",
+                    "direction": direction,
+                    "token_id": side["token_id"],
+                    "pair_cost": pair_cost,
+                    "wait_sec": elapsed,
+                }
+
+        # Progress log
+        elapsed = int(time.time() - start_time)
+        if elapsed % 15 < poll_interval:
+            log.info("  MM: waiting for fill... %ds/%ds", elapsed, timeout_sec)
+
+    # Timeout - cancel both
+    log.info("  MM TIMEOUT: no fill after %ds, cancelling both", timeout_sec)
+    for label, oid in order_ids.items():
+        try:
+            client.cancel(oid)
+        except Exception:
+            pass
+
+    record_order_rejected("mm_timeout", f"No fill in {timeout_sec}s")
+    return None
+
+
+# ──────────────────────────────────────────────────────────────
 # Early exit (sell) execution
 # ──────────────────────────────────────────────────────────────
 
