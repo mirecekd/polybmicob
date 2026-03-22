@@ -596,10 +596,12 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
     if daily_loss_usd >= MAX_DAILY_LOSS_USD:
         return
 
-    # Balance check: need at least $2 for both sides ($1 per side)
+    # Balance check: need enough for both sides + buffer for pending trades
+    # Min order is ~5 shares * $0.50 = $2.50/side, so ~$5 min + buffer for resolution wait
+    min_needed = max(MAX_TRADE_USD * 2, 7.00)  # at least $7 to safely play both sides
     wallet = load_wallet_balance().get("usdc_balance", 0)
-    if wallet < MAX_TRADE_USD * 2:
-        log.info("  MM: insufficient balance $%.2f < $%.2f needed for both sides, skipping", wallet, MAX_TRADE_USD * 2)
+    if wallet < min_needed:
+        log.info("  MM: insufficient balance $%.2f < $%.2f needed for both sides, skipping", wallet, min_needed)
         return
 
     current_hour = datetime.now(timezone.utc).hour
