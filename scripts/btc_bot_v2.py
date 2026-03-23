@@ -577,10 +577,6 @@ def _complete_mm_pair(slug: str) -> None:
         if pair_cost >= 1.00:
             log.info("  PAIR RESCUE: %s pair_cost $%.2f >= $1.00 (no arb, but small loss $%.2f better than 50/50 directional)",
                      slug, pair_cost, (pair_cost - 1.00) * trade.get("shares", 5))
-
-        # Buy opposite side via FOK
-        opp_exec = round(min(opp_best_ask + 0.01, 0.95), 2)
-        min_order = int(book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
         shares = trade.get("shares", 5)
         shares = max(shares, min_order, math.ceil(1.00 / opp_exec))
 
@@ -1152,7 +1148,7 @@ def main() -> None:
     # ── 4. Start Market Clock (emits "market_tick" events) ────
     clock = MarketClock(
         bus=bus,
-        pre_market_sec=30,    # 30s before slot: pre-market scan
+        pre_market_sec=120,   # 120s before slot: MM needs time for maker fills
         mid_play_sec=90,      # 90s after slot: in-play analysis
         ending_sec=60,        # 60s before end: hedge check
     )
