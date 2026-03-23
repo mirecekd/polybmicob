@@ -18,8 +18,13 @@ Contract addresses (Polygon mainnet):
   - USDC.e:            0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
 """
 
+import json
 import logging
+import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from eth_abi import encode
@@ -123,6 +128,112 @@ class ClaimResult:
     tx_hash: str
     success: bool
     error: str = ""
+    failure_type: str = ""       # "quota_exceeded", "relayer_error", "tx_failed"
+    retry_after_sec: int = 0     # seconds until relayer quota resets
+    queued: bool = False         # True if enqueued for external agent
+
+
+# ──────────────────────────────────────────────────────────────
+# Relayer quota detection
+# ──────────────────────────────────────────────────────────────
+
+# Module-level cooldown: skip relayer calls until this epoch time
+_relayer_cooldown_until: float = 0.0
+
+
+def _is_quota_exceeded(error_str: str) -> tuple[bool, int]:
+    """
+    Check if an error string indicates relayer quota exhaustion.
+
+    Returns:
+        (is_quota_error, retry_after_seconds)
+    """
+    if "status_code=429" not in error_str and "quota exceeded" not in error_str:
+        return False, 0
+
+    # Try to parse "resets in N seconds"
+    match = re.search(r"resets in (\d+) seconds", error_str)
+    retry_after = int(match.group(1)) if match else 3600  # default 1h if unparseable
+
+    return True, retry_after
+
+
+def is_relayer_in_cooldown() -> bool:
+    """Check if relayer is currently in quota cooldown."""
+    return time.time() < _relayer_cooldown_until
+
+
+def get_relayer_cooldown_remaining() -> int:
+    """Seconds remaining in relayer cooldown (0 if not in cooldown)."""
+    remaining = _relayer_cooldown_until - time.time()
+    return max(0, int(remaining))
+
+
+# ──────────────────────────────────────────────────────────────
+# Claim queue (fallback for external agent)
+# ──────────────────────────────────────────────────────────────
+
+CLAIM_QUEUE_FILE = Path(__file__).parent.parent / "data" / "claim_queue.json"
+
+
+def load_claim_queue() -> list[dict]:
+    """Load pending claim queue from disk."""
+    if not CLAIM_QUEUE_FILE.exists():
+        return []
+    try:
+        return json.loads(CLAIM_QUEUE_FILE.read_text())
+    except Exception:
+        return []
+
+
+def save_claim_queue(items: list[dict]) -> None:
+    """Save claim queue to disk."""
+    CLAIM_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CLAIM_QUEUE_FILE.write_text(json.dumps(items, indent=2))
+
+
+def enqueue_claim(position: ClaimablePosition, reason: str) -> bool:
+    """
+    Add a position to the claim fallback queue. Deduplicates by condition_id.
+
+    Returns True if newly enqueued, False if already present.
+    """
+    queue = load_claim_queue()
+
+    # Dedupe: skip if already pending for this condition_id
+    existing_ids = {
+        item["condition_id"]
+        for item in queue
+        if item.get("status") == "pending"
+    }
+    if position.condition_id in existing_ids:
+        log.info(
+            "  Claim already queued, skipping duplicate: %s",
+            position.condition_id[:18],
+        )
+        return False
+
+    queue.append({
+        "condition_id": position.condition_id,
+        "title": position.title,
+        "outcome": position.outcome,
+        "slug": position.slug,
+        "negative_risk": position.negative_risk,
+        "size": position.size,
+        "current_value": position.current_value,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+        "status": "pending",
+    })
+
+    save_claim_queue(queue)
+    log.info(
+        "  Queued claim fallback: %s [%s] conditionId=%s",
+        position.title,
+        position.outcome,
+        position.condition_id[:18],
+    )
+    return True
 
 
 # ──────────────────────────────────────────────────────────────
@@ -327,6 +438,18 @@ def claim_all_winnings(
     Returns:
         List of ClaimResult objects.
     """
+    global _relayer_cooldown_until
+
+    # Gate: skip entirely if relayer is in quota cooldown
+    if is_relayer_in_cooldown():
+        remaining = get_relayer_cooldown_remaining()
+        log.info(
+            "Relayer in quota cooldown (%d min %d sec remaining), skipping claim cycle.",
+            remaining // 60,
+            remaining % 60,
+        )
+        return []
+
     log.info("Checking for claimable positions (wallet: %s)...", proxy_wallet)
 
     positions = get_claimable_positions(proxy_wallet)
@@ -380,7 +503,7 @@ def claim_all_winnings(
     log.info("Relayer client initialized, submitting gasless claims...")
 
     results = []
-    for p in positions:
+    for idx, p in enumerate(positions):
         log.info(
             "Claiming: %s [%s] (conditionId: %s...)",
             p.title,
@@ -389,6 +512,50 @@ def claim_all_winnings(
         )
 
         result = redeem_via_relayer(client, p)
+
+        # Check for relayer quota exhaustion (429)
+        is_quota, retry_sec = _is_quota_exceeded(result.error)
+        if is_quota:
+            result.failure_type = "quota_exceeded"
+            result.retry_after_sec = retry_sec
+
+            # Set module-level cooldown
+            _relayer_cooldown_until = time.time() + retry_sec
+            log.warning(
+                "Relayer quota exceeded! Resets in %d min %d sec. "
+                "Entering cooldown, queueing remaining claims.",
+                retry_sec // 60,
+                retry_sec % 60,
+            )
+
+            # Enqueue this failed position
+            enqueue_claim(p, "relayer_quota_exceeded")
+            result.queued = True
+            results.append(result)
+
+            # Enqueue all remaining positions (don't even try relayer)
+            remaining = positions[idx + 1:]
+            if remaining:
+                log.info(
+                    "Queueing %d remaining claim(s) for external agent...",
+                    len(remaining),
+                )
+            for rp in remaining:
+                enqueue_claim(rp, "relayer_quota_exceeded")
+                results.append(ClaimResult(
+                    condition_id=rp.condition_id,
+                    title=rp.title,
+                    tx_hash="",
+                    success=False,
+                    error="Queued (relayer quota exceeded)",
+                    failure_type="quota_exceeded",
+                    retry_after_sec=retry_sec,
+                    queued=True,
+                ))
+
+            # Stop the claim loop - further relayer calls would all 429
+            break
+
         results.append(result)
 
         if result.success:
@@ -398,6 +565,12 @@ def claim_all_winnings(
 
     succeeded = sum(1 for r in results if r.success)
     failed = sum(1 for r in results if not r.success)
-    log.info("Claim complete: %d succeeded, %d failed", succeeded, failed)
+    queued = sum(1 for r in results if r.queued)
+    log.info(
+        "Claim complete: %d succeeded, %d failed, %d queued for external agent",
+        succeeded,
+        failed,
+        queued,
+    )
 
     return results

@@ -147,6 +147,7 @@ MM_TRADING_HOURS: set[int] | None = (
     else None
 )
 MM_PAIR_REDEEM_SEC = int(os.environ.get("MM_PAIR_REDEEM_SEC", "120"))
+MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "3"))
 
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
 FLASH_CRASH_MIN_DROP = float(os.environ.get("FLASH_CRASH_MIN_DROP_PCT", "20.0"))
@@ -618,10 +619,28 @@ def _complete_mm_pair(slug: str) -> None:
             log.debug("  PAIR COMPLETE failed: %s", exc)
 
 
+def _count_open_positions() -> int:
+    """Count unresolved trades (open positions) from today's traded_slugs."""
+    trades = load_trades()
+    return sum(
+        1 for t in trades
+        if not t.get("resolved")
+        and not t.get("dry_run", True)
+        and t.get("mode", "").startswith("mm-pair")
+    )
+
+
 def _handle_mm_only(slug: str, slot_ts: int) -> None:
     """Off-hours MM pair: bid both sides without directional signal. Runs 24/7."""
     if slug in traded_slugs:
         return
+
+    # Max open positions check (prevents over-exposure)
+    if MAX_OPEN_POSITIONS > 0:
+        open_count = _count_open_positions()
+        if open_count >= MAX_OPEN_POSITIONS:
+            log.info("  MM: open positions %d >= %d limit, skipping new pair", open_count, MAX_OPEN_POSITIONS)
+            return
 
     # NOTE: MM pair does NOT check daily_loss or consec_losses
     # MM arb (both fill) has zero directional risk, partials are 50/50
@@ -1077,6 +1096,10 @@ def main() -> None:
         log.info("Volume filter: ENABLED (min $%.0f)", MIN_VOLUME_USD)
     else:
         log.info("Volume filter: disabled (all markets)")
+    if MAX_OPEN_POSITIONS > 0:
+        log.info("Max open positions: %d (MM pairs)", MAX_OPEN_POSITIONS)
+    else:
+        log.info("Max open positions: unlimited")
     log.info("=" * 60)
 
     # ── 1. Create EventBus ────────────────────────────────────
