@@ -220,6 +220,7 @@ consecutive_losses: int = 0
 paused_until: float = 0.0
 shutdown_requested: bool = False
 circuit_breaker_active: bool = False  # halt all trading on MM partial loss
+_bot_start_time: str = ""  # ISO timestamp of bot start (circuit breaker ignores losses before this)
 
 
 def restore_state_from_trades() -> None:
@@ -296,12 +297,13 @@ def _update_risk_state() -> None:
             consecutive_losses, PAUSE_AFTER_LOSSES_SEC,
         )
 
-    # Circuit breaker: detect MM partial (unpaired) losses
+    # Circuit breaker: detect MM partial (unpaired) losses AFTER bot start
     # An MM partial that resolves as loss means pair didn't lock = infrastructure problem
-    if MM_CIRCUIT_BREAKER and not circuit_breaker_active:
+    # Only considers trades placed after _bot_start_time (ignores pre-restart history)
+    if MM_CIRCUIT_BREAKER and not circuit_breaker_active and _bot_start_time:
         mm_partial_losses = [
             t for t in trades
-            if t.get("timestamp", "").startswith(today)
+            if t.get("timestamp", "") >= _bot_start_time
             and t.get("mode", "").startswith("mm-pair")
             and not t.get("hedged", False)
             and t.get("resolved") is not None

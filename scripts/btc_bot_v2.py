@@ -1105,6 +1105,9 @@ def main() -> None:
 
     # ── 7. Restore state from previous runs ───────────────────
     restore_state_from_trades()
+    # Set bot start time BEFORE first risk state check (circuit breaker ignores older losses)
+    _v1._bot_start_time = datetime.now(timezone.utc).isoformat()
+    log.info("Circuit breaker start time: %s (ignoring older MM losses)", _v1._bot_start_time)
     _update_risk_state()
 
     # ── 8. Signal handlers ────────────────────────────────────
