@@ -570,9 +570,13 @@ def _complete_mm_pair(slug: str) -> None:
             continue
 
         pair_cost = entry_price + opp_best_ask
-        if pair_cost >= 1.00:
-            log.info("  PAIR SKIP: %s pair_cost $%.2f >= $1.00 (no arb edge)", slug, pair_cost)
+        max_rescue_cost = 1.05  # accept up to 5% overplate as insurance vs 50/50 directional loss
+        if pair_cost >= max_rescue_cost:
+            log.info("  PAIR SKIP: %s pair_cost $%.2f >= $%.2f (too expensive even as insurance)", slug, pair_cost, max_rescue_cost)
             continue
+        if pair_cost >= 1.00:
+            log.info("  PAIR RESCUE: %s pair_cost $%.2f >= $1.00 (no arb, but small loss $%.2f better than 50/50 directional)",
+                     slug, pair_cost, (pair_cost - 1.00) * trade.get("shares", 5))
 
         # Buy opposite side via FOK
         opp_exec = round(min(opp_best_ask + 0.01, 0.95), 2)
