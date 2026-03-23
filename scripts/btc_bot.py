@@ -1026,6 +1026,7 @@ def place_mm_pair(
     # Monitor both orders - when one fills, cancel the other
     start_time = time.time()
     poll_interval = 3  # faster polling for MM (time-sensitive)
+    filled_sides = set()  # Track fills ACROSS iterations (not per-iteration!)
 
     while time.time() - start_time < timeout_sec:
         if shutdown_requested:
@@ -1038,19 +1039,17 @@ def place_mm_pair(
 
         time.sleep(poll_interval)
 
-        # Check each side for fill - track which sides filled
-        filled_sides = set()
+        # Check each side for fill (only sides not yet recorded)
         for side in sides:
             if side["label"] not in order_ids:
                 continue
             if side["label"] in filled_sides:
-                continue
+                continue  # already recorded this fill, skip
             if _check_position_exists(side["token_id"]):
-                if side["label"] not in filled_sides:
-                    filled_sides.add(side["label"])
-                    elapsed = int(time.time() - start_time)
-                    log.info("  MM %s FILLED after %ds!", side["label"], elapsed)
-                    record_order_filled()
+                filled_sides.add(side["label"])
+                elapsed = int(time.time() - start_time)
+                log.info("  MM %s FILLED after %ds!", side["label"], elapsed)
+                record_order_filled()
 
         # Both sides filled = ARB LOCKED! Return immediately
         if len(filled_sides) == 2:
