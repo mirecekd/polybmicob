@@ -553,9 +553,9 @@ def _complete_mm_pair(slug: str) -> None:
             _mark_trade_hedged(slug, opp_token, 0, 0, entry_price)
             continue
 
-        # Retry orderbook check for up to 30s - prices change fast, wait for affordable ask
+        # Retry orderbook check for up to 60s - prices change fast, wait for affordable ask
         max_rescue_cost = 1.05  # accept up to 5% overplate as insurance
-        rescue_timeout = 30  # seconds to keep retrying
+        rescue_timeout = 60  # seconds to keep retrying
         rescue_interval = 5  # seconds between retries
         rescue_start = time.time()
         opp_best_ask = None
