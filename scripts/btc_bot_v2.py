@@ -680,6 +680,17 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
                 log.info("  MM: open positions %d >= %d limit, skipping remaining markets", open_count, MAX_OPEN_POSITIONS)
                 return
 
+        # Skip markets too far away (>5min to start = would tie up capital too long)
+        if mkt.minutes_to_start > 5.0:
+            log.info("  MM: %s starts in %.1f min (>5min), skipping", mkt.slug, mkt.minutes_to_start)
+            continue
+
+        # Cap timeout: never wait past market start (leave 30s buffer for completion)
+        seconds_to_start = int(mkt.minutes_to_start * 60)
+        effective_timeout = min(MAKER_TIMEOUT_SEC, max(seconds_to_start - 30, 30))
+        if effective_timeout != MAKER_TIMEOUT_SEC:
+            log.info("  MM: capping timeout %ds -> %ds (market starts in %ds)", MAKER_TIMEOUT_SEC, effective_timeout, seconds_to_start)
+
         # MM pair needs higher liquidity than directional (both sides must fill)
         if mkt.liquidity < 1000:
             log.info("  MM: %s liquidity $%.0f < $1000, skipping (need both sides to fill)", mkt.slug, mkt.liquidity)
@@ -696,7 +707,7 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
         result = place_mm_pair(
             client, mkt.up_token_id, mkt.down_token_id,
             MAX_TRADE_USD, mkt.slug,
-            timeout_sec=MAKER_TIMEOUT_SEC, dry_run=dry_run,
+            timeout_sec=effective_timeout, dry_run=dry_run,
         )
 
         if result is None or not result.get("filled"):
