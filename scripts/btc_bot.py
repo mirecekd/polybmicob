@@ -149,6 +149,11 @@ INSURANCE_MAX_PRICE = float(os.environ.get("INSURANCE_MAX_PRICE", "0.15"))
 MAKER_MODE_ENABLED = os.environ.get("MAKER_MODE_ENABLED", "false").lower() == "true"
 MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 
+# Maximum allowed pair cost for MM pairs (UP bid + DOWN bid).
+# Pairs with adjusted cost above this value are skipped entirely.
+# Lower = higher profit per pair but fewer fills. Recommended: 0.98
+MM_PAIR_MAX_COST = float(os.environ.get("MM_PAIR_MAX_COST", "0.98"))
+
 # Black-Scholes fair value: replace heuristic momentum probability with BS model
 # Uses realized BTC volatility from 30x1m klines to compute mathematical probability
 # that BTC continues in current direction for remaining time in 5-min window
@@ -931,36 +936,46 @@ def place_mm_pair(
         log.info("  MM: need both sides, only got %d, aborting", len(sides))
         return None
 
-    pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
-    pair_profit = 1.00 - pair_cost
+    raw_pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
+    pair_cost = raw_pair_cost
 
-    # If pair_cost >= $1.00, reduce prices to guarantee profit if both fill
-    # Reduce the more expensive side first (more room to drop)
-    if pair_cost >= 1.00:
-        # Target: pair_cost = $0.98 (leaves $0.02 profit margin)
-        target_pair = 0.98
-        excess = pair_cost - target_pair
-        # Split reduction across both sides (reduce more expensive side more)
-        for _ in range(10):  # max 10 iterations
-            if pair_cost < 1.00:
+    # If pair_cost > MM_PAIR_MAX_COST, reduce the more expensive side
+    # to bring pair_cost within the allowed threshold
+    if pair_cost > MM_PAIR_MAX_COST:
+        for _ in range(20):  # max 20 iterations (covers wide spreads)
+            if pair_cost <= MM_PAIR_MAX_COST:
                 break
             # Reduce more expensive side by $0.01
             expensive = max(sides, key=lambda s: s["maker_price"])
             expensive["maker_price"] = round(expensive["maker_price"] - 0.01, 2)
             pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
+            # Abort if any side drops below minimum viable price
+            if any(s["maker_price"] < 0.02 for s in sides):
+                break
 
     pair_profit = 1.00 - pair_cost
 
     # Absolute minimum: each side must be at least $0.02
     if any(s["maker_price"] < 0.02 for s in sides):
-        log.info("  MM: prices too low after adjustment, aborting")
+        log.info(
+            "  MM: prices too low after adjustment (raw=$%.2f, max=$%.2f), aborting",
+            raw_pair_cost, MM_PAIR_MAX_COST,
+        )
+        return None
+
+    # Hard limit: skip pair if still above max cost after adjustment
+    if pair_cost > MM_PAIR_MAX_COST:
+        log.info(
+            "  MM: skip pair, adjusted pair_cost $%.2f > max $%.2f (raw=$%.2f)",
+            pair_cost, MM_PAIR_MAX_COST, raw_pair_cost,
+        )
         return None
 
     log.info(
-        "  MM PAIR: %s bid=$%.2f + %s bid=$%.2f = $%.2f (profit=$%.2f if both fill)",
+        "  MM PAIR: %s bid=$%.2f + %s bid=$%.2f = $%.2f (profit=$%.2f if both fill, max=$%.2f)",
         sides[0]["label"], sides[0]["maker_price"],
         sides[1]["label"], sides[1]["maker_price"],
-        pair_cost, pair_profit,
+        pair_cost, pair_profit, MM_PAIR_MAX_COST,
     )
 
     if dry_run:

@@ -136,6 +136,7 @@ MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
 MAX_VOL_5M = float(os.environ.get("MAX_VOL_5M", "0.12"))  # max 5-min vol % (0=disabled, 0.12=default)
 MM_PAIR_ENABLED = os.environ.get("MM_PAIR_ENABLED", "false").lower() == "true"
+MM_PAIR_MAX_COST = float(os.environ.get("MM_PAIR_MAX_COST", "0.98"))
 MM_PAIR_REDEEM_SEC = int(os.environ.get("MM_PAIR_REDEEM_SEC", "120"))
 
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
@@ -1015,7 +1016,7 @@ def main() -> None:
     else:
         log.info("Volatility filter: disabled")
     if MM_PAIR_ENABLED:
-        log.info("MM Pair: ENABLED (bid both UP+DOWN, profit from spread, $0 maker fee)")
+        log.info("MM Pair: ENABLED (bid both UP+DOWN, max_pair_cost=$%.2f, $0 maker fee)", MM_PAIR_MAX_COST)
     else:
         log.info("MM Pair: disabled (directional trading only)")
     if HEDGE_ENABLED:
