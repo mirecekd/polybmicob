@@ -222,7 +222,9 @@ from scripts.btc_bot import (
     _check_late_hedge,
     _place_insurance_bet,
     _mark_trade_early_exit,
+    MM_CIRCUIT_BREAKER,
 )
+import scripts.btc_bot as _v1  # access shared state (circuit_breaker_active)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -250,6 +252,11 @@ def handle_market_tick(event_type: str, data: dict) -> None:
         data.get("seconds_to_start", 0),
         data.get("seconds_to_end", 0),
     )
+
+    # Circuit breaker: halt ALL trading (including MM) on MM partial loss
+    if _v1.circuit_breaker_active:
+        log.error("CIRCUIT BREAKER ACTIVE: all trading halted. Restart container to resume.")
+        return
 
     # Hour-of-day filter
     current_hour = datetime.now(timezone.utc).hour
@@ -1020,6 +1027,10 @@ def main() -> None:
         log.info("MM Pair: ENABLED (bid both UP+DOWN, max_pair_cost=$%.2f, $0 maker fee)", MM_PAIR_MAX_COST)
     else:
         log.info("MM Pair: disabled (directional trading only)")
+    if MM_CIRCUIT_BREAKER:
+        log.info("Circuit breaker: ENABLED (halt all trading on MM partial loss, restart to resume)")
+    else:
+        log.info("Circuit breaker: disabled")
     if HEDGE_ENABLED:
         log.info(
             "Hedge: ENABLED (max_price=$%.2f, window=%ds)",

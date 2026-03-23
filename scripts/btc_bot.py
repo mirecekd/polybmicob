@@ -154,6 +154,10 @@ MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 # Lower = higher profit per pair but fewer fills. Recommended: 0.98
 MM_PAIR_MAX_COST = float(os.environ.get("MM_PAIR_MAX_COST", "0.98"))
 
+# Circuit breaker: halt ALL trading if an MM partial (unpaired) resolves as loss.
+# Indicates infrastructure problems. Bot stops until manual restart.
+MM_CIRCUIT_BREAKER = os.environ.get("MM_CIRCUIT_BREAKER", "true").lower() == "true"
+
 # Black-Scholes fair value: replace heuristic momentum probability with BS model
 # Uses realized BTC volatility from 30x1m klines to compute mathematical probability
 # that BTC continues in current direction for remaining time in 5-min window
@@ -215,6 +219,7 @@ daily_loss_usd: float = 0.0
 consecutive_losses: int = 0
 paused_until: float = 0.0
 shutdown_requested: bool = False
+circuit_breaker_active: bool = False  # halt all trading on MM partial loss
 
 
 def restore_state_from_trades() -> None:
@@ -290,6 +295,29 @@ def _update_risk_state() -> None:
             "PAUSING: %d consecutive losses, pausing for %ds",
             consecutive_losses, PAUSE_AFTER_LOSSES_SEC,
         )
+
+    # Circuit breaker: detect MM partial (unpaired) losses
+    # An MM partial that resolves as loss means pair didn't lock = infrastructure problem
+    if MM_CIRCUIT_BREAKER and not circuit_breaker_active:
+        mm_partial_losses = [
+            t for t in trades
+            if t.get("timestamp", "").startswith(today)
+            and t.get("mode", "").startswith("mm-pair")
+            and not t.get("hedged", False)
+            and t.get("resolved") is not None
+            and not t.get("won", False)
+            and not t.get("dry_run", True)
+        ]
+        if mm_partial_losses:
+            circuit_breaker_active = True
+            t = mm_partial_losses[0]
+            log.error(
+                "CIRCUIT BREAKER TRIGGERED: MM partial loss detected on %s "
+                "(mode=%s, hedged=%s, pnl=$%.2f). "
+                "ALL TRADING HALTED until manual restart!",
+                t.get("slug", "?"), t.get("mode", "?"),
+                t.get("hedged", False), t.get("pnl", 0),
+            )
 
 
 def handle_shutdown(signum, frame):
