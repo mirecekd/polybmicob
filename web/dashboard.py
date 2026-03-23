@@ -257,8 +257,26 @@ def _extract_pair_cost(trade: dict) -> float | None:
     return None
 
 
+def _infer_shares(trade: dict) -> float:
+    """Infer number of shares from a trade record."""
+    price = trade.get("entry_price", 0)
+    pnl = trade.get("pnl")
+    won = trade.get("won")
+    if pnl is not None and price > 0:
+        if won is False:
+            return round(abs(pnl) / price, 1)
+        elif won is True and price < 1.0:
+            return round(pnl / (1.0 - price), 1)
+    # Fallback: assume 5 shares (common minimum)
+    return 5.0
+
+
 def compute_mm_stats(trades: list[dict]) -> dict:
-    """Compute MM pair-specific stats from trade records."""
+    """Compute MM pair-specific stats from trade records.
+
+    For locked pairs (both sides held), real profit = shares * (1.00 - pair_cost).
+    For partials (one side only), P&L is directional (trade.pnl).
+    """
     mm_modes = {"mm-pair", "mm-pair-offhours", "mm-pair-arb", "mm-pair-complete"}
     mm_trades = [t for t in trades if t.get("mode", "") in mm_modes and not t.get("dry_run", True)]
 
@@ -266,7 +284,6 @@ def compute_mm_stats(trades: list[dict]) -> dict:
     mm_today = [t for t in mm_trades if t.get("timestamp", "").startswith(today_str)]
 
     # Group by slug to identify pairs
-    # A "pair" = initial mm-pair/mm-pair-offhours trade + optional mm-pair-complete trade
     slugs_all: dict[str, list[dict]] = {}
     for t in mm_trades:
         slug = t.get("slug", "")
@@ -283,11 +300,13 @@ def compute_mm_stats(trades: list[dict]) -> dict:
 
     def _analyze_pairs(slug_groups: dict[str, list[dict]]) -> dict:
         total_pairs = 0
-        both_filled = 0
+        locked_pairs = 0  # both sides held (arb / hedged / completed)
         partials = 0
         completed = 0  # partial -> full via _complete_mm_pair
         pair_costs: list[float] = []
-        total_pnl = 0.0
+        real_pair_profit = 0.0  # sum of shares * (1 - pair_cost) for locked pairs
+        partial_pnl = 0.0  # directional pnl for unlocked partials
+        pair_details: list[dict] = []  # per-pair breakdown
 
         for slug, tlist in slug_groups.items():
             initial = [t for t in tlist if t.get("mode") in ("mm-pair", "mm-pair-offhours", "mm-pair-arb")]
@@ -300,51 +319,97 @@ def compute_mm_stats(trades: list[dict]) -> dict:
             t0 = initial[0]
             is_hedged = t0.get("hedged", False)
             is_arb = t0.get("mode") == "mm-pair-arb"
+            shares = _infer_shares(t0)
 
             pc = _extract_pair_cost(t0)
 
+            pair_info = {
+                "slug": slug,
+                "time": t0.get("timestamp", "")[:19],
+                "direction": t0.get("direction", "?"),
+                "entry_price": t0.get("entry_price", 0),
+                "pair_cost": pc,
+                "shares": shares,
+                "locked": False,
+                "lock_type": "partial",
+                "pair_profit_usd": 0.0,
+                "resolved": any(t.get("resolved") is not None for t in tlist),
+                "won": None,
+            }
+
+            is_locked = False
+            lock_type = "partial"
+
             if is_arb:
-                both_filled += 1
+                is_locked = True
+                lock_type = "arb"
+                locked_pairs += 1
                 if pc is not None:
                     pair_costs.append(pc)
             elif completions:
+                is_locked = True
+                lock_type = "complete"
                 completed += 1
-                # Use completion's pair_cost if available
+                locked_pairs += 1
                 cpc = _extract_pair_cost(completions[0])
                 if cpc is not None:
                     pair_costs.append(cpc)
+                    pc = cpc
                 elif pc is not None:
                     pair_costs.append(pc)
             elif is_hedged:
-                # Hedged via late-game hedge (not MM completion)
+                is_locked = True
+                lock_type = "hedged"
+                locked_pairs += 1
                 hpc = t0.get("hedge_pair_cost")
                 if hpc is not None:
-                    pair_costs.append(float(hpc))
-                both_filled += 1
+                    pc = float(hpc)
+                    pair_costs.append(pc)
+                elif pc is not None:
+                    pair_costs.append(pc)
             else:
                 partials += 1
                 if pc is not None:
                     pair_costs.append(pc)
 
-            # P&L from resolved trades in this slug
-            for t in tlist:
-                if t.get("resolved") is not None:
-                    total_pnl += t.get("pnl", 0)
+            pair_info["locked"] = is_locked
+            pair_info["lock_type"] = lock_type
+            pair_info["pair_cost"] = pc
+
+            if is_locked and pc is not None:
+                profit = shares * (1.00 - pc)
+                real_pair_profit += profit
+                pair_info["pair_profit_usd"] = round(profit, 2)
+            elif not is_locked:
+                # Partial: use directional pnl from resolved trades
+                for t in tlist:
+                    if t.get("resolved") is not None:
+                        p = t.get("pnl", 0) or 0
+                        partial_pnl += p
+                        pair_info["pair_profit_usd"] = round(p, 2)
+                        pair_info["won"] = t.get("won")
+
+            pair_details.append(pair_info)
 
         avg_pair_cost = sum(pair_costs) / len(pair_costs) if pair_costs else 0
         avg_spread = (1.00 - avg_pair_cost) if avg_pair_cost > 0 else 0
-        fill_rate = (both_filled + completed) / total_pairs if total_pairs > 0 else 0
+        fill_rate = locked_pairs / total_pairs if total_pairs > 0 else 0
+        total_pnl = round(real_pair_profit + partial_pnl, 2)
 
         return {
             "total_pairs": total_pairs,
-            "both_filled": both_filled,
+            "locked_pairs": locked_pairs,
+            "both_filled": locked_pairs,  # backward compat alias
             "partials": partials,
             "completed": completed,
             "avg_pair_cost": avg_pair_cost,
             "avg_spread": avg_spread,
             "fill_rate": fill_rate,
             "total_pnl": total_pnl,
+            "real_pair_profit": round(real_pair_profit, 2),
+            "partial_pnl": round(partial_pnl, 2),
             "pair_costs": pair_costs,
+            "pair_details": pair_details,
         }
 
     all_stats = _analyze_pairs(slugs_all)
@@ -708,6 +773,72 @@ def render_mm_charts(mm_stats: dict) -> str:
     </div>"""
 
 
+def _render_pair_row(p: dict) -> str:
+    """Render a single row for the Today Pair Flow table."""
+    slug = p.get("slug", "")
+    short_slug = slug.replace("btc-updown-5m-", "5m-") if slug else ""
+    direction = p.get("direction", "?").upper()
+    dir_class = "up" if direction == "UP" else "down"
+    price = p.get("entry_price", 0)
+    pc = p.get("pair_cost")
+    pc_str = f"${pc:.2f}" if pc is not None else "-"
+    spread = (1.00 - pc) if pc is not None else 0
+    spread_str = f"${spread:.3f}" if pc is not None else "-"
+    shares = p.get("shares", 5.0)
+    locked = p.get("locked", False)
+    lock_type = p.get("lock_type", "partial")
+    profit = p.get("pair_profit_usd", 0)
+    resolved = p.get("resolved", False)
+    time_str = p.get("time", "")
+
+    # Locked badge
+    if locked:
+        locked_html = '<span style="color:#3fb950;font-weight:600">YES</span>'
+    else:
+        locked_html = '<span style="color:#d29922;font-weight:600">NO</span>'
+
+    # Lock type badge
+    type_colors = {"arb": "#3fb950", "hedged": "#3fb950", "complete": "#58a6ff", "partial": "#d29922"}
+    type_color = type_colors.get(lock_type, "#8b949e")
+    type_html = f'<span style="color:{type_color};font-size:10px;font-weight:600">{lock_type.upper()}</span>'
+
+    # Profit
+    if locked:
+        profit_color = "#3fb950" if profit >= 0 else "#f85149"
+        profit_html = f'<span style="color:{profit_color};font-weight:600">${profit:+.2f}</span>'
+    elif resolved:
+        won = p.get("won")
+        profit_color = "#3fb950" if won else "#f85149"
+        profit_html = f'<span style="color:{profit_color};font-weight:600">${profit:+.2f}</span>'
+    else:
+        profit_html = '<span class="muted">pending</span>'
+
+    # Status
+    if locked and resolved:
+        status_html = '<span style="color:#3fb950;font-weight:600">CLAIMED</span>'
+    elif locked:
+        status_html = '<span style="color:#3fb950;font-weight:600">LOCKED</span>'
+    elif resolved:
+        won = p.get("won")
+        status_html = f'<span style="color:{"#3fb950" if won else "#f85149"};font-weight:600">{"WIN" if won else "LOSS"}</span>'
+    else:
+        status_html = '<span class="muted">pending</span>'
+
+    return f"""<tr>
+      <td class="muted">{time_str[11:] if len(time_str) > 11 else time_str}</td>
+      <td>{short_slug}</td>
+      <td class="{dir_class}">{direction}</td>
+      <td>${price:.2f}</td>
+      <td>{locked_html}</td>
+      <td>{type_html}</td>
+      <td>{pc_str}</td>
+      <td>{spread_str}</td>
+      <td>{shares:.0f}</td>
+      <td>{profit_html}</td>
+      <td>{status_html}</td>
+    </tr>"""
+
+
 def render_mm_html() -> str:
     """Render MM pair-specific dashboard (when MM_PAIR_ENABLED=true)."""
     trades = load_trades()
@@ -887,18 +1018,23 @@ def render_mm_html() -> str:
   </div>
   <div class="hero-card">
     <div class="num" style="color:{today_pnl_color}">${t['total_pnl']:+.2f}</div>
-    <div class="lbl">Today MM P&L</div>
-    <div class="detail">{t['total_pairs']} pairs | <span style="color:{hourly_color}">${hourly_rate:+.2f}/h</span> ({hours_active:.1f}h active)</div>
+    <div class="lbl">Today Real P&L</div>
+    <div class="detail">locked ${t['real_pair_profit']:+.2f} + partial ${t['partial_pnl']:+.2f} | <span style="color:{hourly_color}">${hourly_rate:+.2f}/h</span></div>
+  </div>
+  <div class="hero-card">
+    <div class="num" style="color:{'#3fb950' if t['real_pair_profit'] >= 0 else '#f85149'}">${t['real_pair_profit']:+.2f}</div>
+    <div class="lbl">Locked Pair Profit</div>
+    <div class="detail">{t['locked_pairs']} locked / {t['total_pairs']} pairs today ({hours_active:.1f}h)</div>
   </div>
   <div class="hero-card">
     <div class="num" style="color:{all_pnl_color}">${a['total_pnl']:+.2f}</div>
     <div class="lbl">All-Time MM P&L</div>
-    <div class="detail">{a['total_pairs']} pairs total</div>
+    <div class="detail">locked ${a['real_pair_profit']:+.2f} + partial ${a['partial_pnl']:+.2f}</div>
   </div>
   <div class="hero-card">
     <div class="num" style="color:{fill_rate_color}">{a['fill_rate']:.0%}</div>
-    <div class="lbl">Fill Rate</div>
-    <div class="detail">{a['both_filled'] + a['completed']} arb+complete / {a['total_pairs']} total</div>
+    <div class="lbl">Lock Rate</div>
+    <div class="detail">{a['locked_pairs']} locked / {a['total_pairs']} total</div>
   </div>
   <div class="hero-card">
     <div class="num" style="color:{spread_color}">${a['avg_spread']:.3f}</div>
@@ -964,6 +1100,20 @@ def render_mm_html() -> str:
 {render_mm_charts(mm)}
 
 {'<div class="empty">No MM trades yet. Bot is running in MM pair mode 24/7.</div>' if not mm_trades else f"""
+<details open>
+  <summary>Today Pair Flow ({t['total_pairs']} pairs: {t['locked_pairs']} locked, {t['partials']} partial)</summary>
+  <div class="expand-content">
+    <table>
+    <thead>
+      <tr><th>Time</th><th>Market</th><th>1st Side</th><th>Price</th><th>Locked?</th><th>Lock Type</th><th>Pair Cost</th><th>Spread</th><th>~Shares</th><th>Profit</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+    {''.join(_render_pair_row(p) for p in reversed(t.get('pair_details', []))) if t.get('pair_details') else '<tr><td colspan="11" class="muted" style="text-align:center;padding:20px;">No pairs today yet</td></tr>'}
+    </tbody>
+    </table>
+  </div>
+</details>
+
 <details>
   <summary>Recent MM Pairs ({min(len(mm_trades), 50)} of {len(mm_trades)})</summary>
   <div class="expand-content">
