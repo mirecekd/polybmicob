@@ -672,6 +672,14 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
             return
         if mkt.slug in traded_slugs:
             continue
+
+        # Re-check open positions limit before each new pair in the loop
+        if MAX_OPEN_POSITIONS > 0:
+            open_count = _count_open_positions()
+            if open_count >= MAX_OPEN_POSITIONS:
+                log.info("  MM: open positions %d >= %d limit, skipping remaining markets", open_count, MAX_OPEN_POSITIONS)
+                return
+
         # MM pair needs higher liquidity than directional (both sides must fill)
         if mkt.liquidity < 1000:
             log.info("  MM: %s liquidity $%.0f < $1000, skipping (need both sides to fill)", mkt.slug, mkt.liquidity)
