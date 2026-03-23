@@ -250,12 +250,14 @@ def _update_risk_state() -> None:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     trades = load_trades()
 
-    # Filter to today's resolved live trades
+    # Filter to today's resolved live trades (exclude MM-pair trades from risk limits)
+    # MM pairs have zero/minimal directional risk and should not trigger pause
     today_resolved = [
         t for t in trades
         if t.get("timestamp", "").startswith(today)
         and t.get("resolved") is not None
         and not t.get("dry_run", True)
+        and not t.get("mode", "").startswith("mm-pair")
     ]
 
     # Compute daily loss (sum of negative PnL only)

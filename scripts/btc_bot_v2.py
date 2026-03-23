@@ -259,30 +259,31 @@ def handle_market_tick(event_type: str, data: dict) -> None:
         log.info("Hour %02d UTC not in trading hours, skipping.", current_hour)
         return
 
-    # Check pause
-    if time.time() < paused_until:
+    # Check pause (only blocks directional trading, MM pair is exempt)
+    is_paused = time.time() < paused_until
+    if is_paused:
         remaining = int(paused_until - time.time())
-        log.info("Paused for %d more seconds", remaining)
-        return
+        log.info("Paused for %d more seconds (directional only, MM exempt)", remaining)
 
     if phase == "pre_market":
         if MM_PAIR_ENABLED:
-            # MM pair always runs first (24/7, no filters needed)
+            # MM pair always runs first (24/7, no risk limits, no pause)
             _handle_mm_only(slug, slot_ts)
-        if in_trading_hours and slug not in traded_slugs:
-            # Directional trading on top (only during trading hours, only if MM didn't fill)
+        if not is_paused and in_trading_hours and slug not in traded_slugs:
+            # Directional trading on top (only during trading hours, respects pause)
             _handle_pre_market(slug, slot_ts)
     elif phase == "in_play":
-        # At market start: try to complete MM pairs (buy missing side)
+        # At market start: try to complete MM pairs (buy missing side, no pause)
         if MM_PAIR_ENABLED:
             _complete_mm_pair(slug)
-        if in_trading_hours:
+        if not is_paused and in_trading_hours:
             _handle_in_play(slug, slot_ts)
     elif phase == "mid_play":
-        if in_trading_hours:
+        if not is_paused and in_trading_hours:
             _handle_in_play(slug, slot_ts)  # same logic, second check
     elif phase == "ending":
-        _handle_ending(slug, slot_ts)
+        if not is_paused:
+            _handle_ending(slug, slot_ts)
 
 
 def _handle_pre_market(slug: str, slot_ts: int) -> None:
