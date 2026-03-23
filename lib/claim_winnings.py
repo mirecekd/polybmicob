@@ -443,11 +443,11 @@ def claim_all_winnings(
     # Gate: skip entirely if relayer is in quota cooldown
     if is_relayer_in_cooldown():
         remaining = get_relayer_cooldown_remaining()
-        log.info(
-            "Relayer in quota cooldown (%d min %d sec remaining), skipping claim cycle.",
-            remaining // 60,
-            remaining % 60,
-        )
+        hours, mins = remaining // 3600, (remaining % 3600) // 60
+        if hours > 0:
+            log.info("Relayer 429 cooldown: %dh %dmin remaining, skipping claim.", hours, mins)
+        else:
+            log.info("Relayer 429 cooldown: %dmin %ds remaining, skipping claim.", mins, remaining % 60)
         return []
 
     log.info("Checking for claimable positions (wallet: %s)...", proxy_wallet)
@@ -521,12 +521,17 @@ def claim_all_winnings(
 
             # Set module-level cooldown
             _relayer_cooldown_until = time.time() + retry_sec
-            log.warning(
-                "Relayer quota exceeded! Resets in %d min %d sec. "
-                "Entering cooldown, queueing remaining claims.",
-                retry_sec // 60,
-                retry_sec % 60,
-            )
+            hours, mins = retry_sec // 3600, (retry_sec % 3600) // 60
+            if hours > 0:
+                log.warning(
+                    "Relayer 429 quota exceeded! Resets in %dh %dmin. Entering cooldown, queueing remaining claims.",
+                    hours, mins,
+                )
+            else:
+                log.warning(
+                    "Relayer 429 quota exceeded! Resets in %dmin %ds. Entering cooldown, queueing remaining claims.",
+                    mins, retry_sec % 60,
+                )
 
             # Enqueue this failed position
             enqueue_claim(p, "relayer_quota_exceeded")

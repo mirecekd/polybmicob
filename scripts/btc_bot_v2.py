@@ -689,9 +689,9 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
             log.info("  MM: %s starts in %.1f min (>5min), skipping", mkt.slug, mkt.minutes_to_start)
             continue
 
-        # Cap timeout: wait until market start (max fill time, completion happens at in_play tick)
+        # Cap timeout: wait until 60s into market (orders can still fill during early in-play)
         seconds_to_start = int(mkt.minutes_to_start * 60)
-        effective_timeout = min(MAKER_TIMEOUT_SEC, max(seconds_to_start, 30))
+        effective_timeout = min(MAKER_TIMEOUT_SEC, max(seconds_to_start + 60, 30))
         if effective_timeout != MAKER_TIMEOUT_SEC:
             log.info("  MM: capping timeout %ds -> %ds (market starts in %ds)", MAKER_TIMEOUT_SEC, effective_timeout, seconds_to_start)
 
