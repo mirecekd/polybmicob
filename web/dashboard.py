@@ -244,16 +244,21 @@ def compute_stats(trades: list[dict]) -> dict:
 
 
 def _extract_pair_cost(trade: dict) -> float | None:
-    """Extract pair_cost from trade reason string or hedge_pair_cost field."""
-    # First check hedge_pair_cost (set when pair is completed)
-    hpc = trade.get("hedge_pair_cost")
-    if hpc is not None:
-        return float(hpc)
+    """Extract pair_cost from trade reason string or hedge_pair_cost field.
+
+    NOTE: The reason string contains the real combined pair_cost (UP + DOWN).
+    The hedge_pair_cost field in older bot versions stores just the entry_price
+    of the first side (not the combined cost), so we parse reason FIRST.
+    """
     # Parse from reason: "MM-pair off-hours (pair_cost=$0.98)"
     reason = trade.get("reason", "")
     m = re.search(r"pair_cost=\$([0-9.]+)", reason)
     if m:
         return float(m.group(1))
+    # Fallback: hedge_pair_cost (may be inaccurate in older bot versions)
+    hpc = trade.get("hedge_pair_cost")
+    if hpc is not None:
+        return float(hpc)
     return None
 
 
@@ -361,11 +366,8 @@ def compute_mm_stats(trades: list[dict]) -> dict:
                 is_locked = True
                 lock_type = "hedged"
                 locked_pairs += 1
-                hpc = t0.get("hedge_pair_cost")
-                if hpc is not None:
-                    pc = float(hpc)
-                    pair_costs.append(pc)
-                elif pc is not None:
+                # pc already extracted via _extract_pair_cost (reason first, hedge_pair_cost fallback)
+                if pc is not None:
                     pair_costs.append(pc)
             else:
                 partials += 1
@@ -1037,11 +1039,6 @@ def render_mm_html() -> str:
     <div class="num" style="color:{fill_rate_color}">{a['fill_rate']:.0%}</div>
     <div class="lbl">Lock Rate</div>
     <div class="detail">{a['locked_pairs']} locked / {a['total_pairs']} total</div>
-  </div>
-  <div class="hero-card">
-    <div class="num" style="color:{avg_profit_color}">${avg_profit_per_pair:.2f}</div>
-    <div class="lbl">Avg Profit/Pair</div>
-    <div class="detail">avg cost ${a['avg_pair_cost']:.3f} | {mm['pending']} pending</div>
   </div>
 </div>
 
