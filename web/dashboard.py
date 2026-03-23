@@ -905,7 +905,9 @@ def render_mm_html() -> str:
         hourly_rate = 0
     hourly_color = "#3fb950" if hourly_rate >= 0 else "#f85149"
     fill_rate_color = "#3fb950" if a["fill_rate"] >= 0.5 else "#d29922" if a["fill_rate"] >= 0.2 else "#f85149"
-    spread_color = "#3fb950" if a["avg_spread"] > 0.01 else "#d29922"
+    # Avg profit per locked pair
+    avg_profit_per_pair = (a["real_pair_profit"] / a["locked_pairs"]) if a["locked_pairs"] > 0 else 0
+    avg_profit_color = "#3fb950" if avg_profit_per_pair > 0 else "#d29922"
 
     # Build MM trades table rows
     mm_trades = mm.get("mm_trades", [])
@@ -1037,9 +1039,9 @@ def render_mm_html() -> str:
     <div class="detail">{a['locked_pairs']} locked / {a['total_pairs']} total</div>
   </div>
   <div class="hero-card">
-    <div class="num" style="color:{spread_color}">${a['avg_spread']:.3f}</div>
-    <div class="lbl">Avg Spread</div>
-    <div class="detail">pair cost ${a['avg_pair_cost']:.3f} | {mm['pending']} pending</div>
+    <div class="num" style="color:{avg_profit_color}">${avg_profit_per_pair:.2f}</div>
+    <div class="lbl">Avg Profit/Pair</div>
+    <div class="detail">avg cost ${a['avg_pair_cost']:.3f} | {mm['pending']} pending</div>
   </div>
 </div>
 
@@ -1092,8 +1094,8 @@ def render_mm_html() -> str:
     <div class="lbl">Avg Cost Today</div>
   </div>
   <div class="stat">
-    <div class="val" style="color:{'#3fb950' if t['avg_spread'] > 0.01 else '#d29922'}">${t['avg_spread']:.3f}</div>
-    <div class="lbl">Avg Spread Today</div>
+    <div class="val" style="color:{'#3fb950' if t['real_pair_profit'] > 0 else '#d29922'}">${(t['real_pair_profit'] / t['locked_pairs'] if t['locked_pairs'] > 0 else 0):.2f}</div>
+    <div class="lbl">Avg Profit Today</div>
   </div>
 </div>
 
