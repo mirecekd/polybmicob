@@ -890,8 +890,141 @@ def _handle_in_play(slug: str, slot_ts: int) -> None:
                 pass
 
 
+def _last_resort_mm_complete(slug: str) -> None:
+    """
+    Last-resort pair completion ~60s before market end.
+
+    At this point the outcome is nearly decided - one side is close to $1, other close to $0.
+    Even buying at pair_cost=$1.00 (break-even) is better than 50/50 directional risk.
+    Accepts up to $1.10 pair_cost (max $0.50 loss vs $2.45 directional loss).
+    """
+    import json as _json
+
+    trades = load_trades()
+    mm_trades = [
+        t for t in trades
+        if t.get("slug") == slug
+        and t.get("mode", "").startswith("mm-pair")
+        and not t.get("hedged")
+        and not t.get("resolved")
+        and not t.get("dry_run", True)
+    ]
+
+    if not mm_trades:
+        return
+
+    for trade in mm_trades:
+        direction = trade.get("direction", "")
+        entry_price = trade.get("exec_price") or trade.get("entry_price", 0.50)
+
+        # Get market token IDs
+        try:
+            resp = httpx.get(
+                "https://gamma-api.polymarket.com/events",
+                params={"slug": slug},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                continue
+            mkt = data[0].get("markets", [{}])[0]
+            token_ids_raw = mkt.get("clobTokenIds")
+            if isinstance(token_ids_raw, str):
+                token_ids = _json.loads(token_ids_raw)
+            else:
+                token_ids = token_ids_raw or []
+            if len(token_ids) < 2:
+                continue
+        except Exception:
+            continue
+
+        if direction == "down":
+            opp_token = token_ids[0]
+            opp_dir = "UP"
+        else:
+            opp_token = token_ids[1]
+            opp_dir = "DOWN"
+
+        from scripts.btc_bot import _check_position_exists, _mark_trade_hedged
+        if _check_position_exists(opp_token):
+            continue  # already completed
+
+        # Get best ask - accept up to $1.10 pair_cost (last resort)
+        try:
+            book_resp = httpx.get(
+                f"{CLOB_HOST}/book",
+                params={"token_id": opp_token},
+                timeout=10,
+            )
+            book_resp.raise_for_status()
+            book = book_resp.json()
+            asks = sorted(book.get("asks", []), key=lambda a: float(a["price"]))
+            if not asks:
+                continue
+            opp_best_ask = float(asks[0]["price"])
+        except Exception:
+            continue
+
+        pair_cost = entry_price + opp_best_ask
+        max_last_resort_cost = 1.10  # accept up to $0.50 loss (5 shares * $0.10) vs $2.45 directional
+        if pair_cost >= max_last_resort_cost:
+            log.info("  LAST RESORT SKIP: %s pair_cost $%.2f >= $%.2f (too expensive even as last resort)",
+                     slug, pair_cost, max_last_resort_cost)
+            continue
+
+        opp_exec = round(min(opp_best_ask + 0.01, 0.99), 2)
+        shares = trade.get("shares", 5)
+        min_order = int(book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+        shares = max(shares, min_order, math.ceil(1.00 / opp_exec))
+
+        cost_of_rescue = (pair_cost - 1.00) * shares if pair_cost > 1.00 else 0
+        log.info(
+            "  LAST RESORT: %s buy %s @ $%.2f (pair_cost $%.2f, rescue cost $%.2f vs directional risk $%.2f)",
+            slug, opp_dir, opp_exec, pair_cost, cost_of_rescue, entry_price * shares,
+        )
+
+        if dry_run:
+            _mark_trade_hedged(slug, opp_token, opp_exec, shares, pair_cost)
+            continue
+
+        try:
+            client = get_clob_client()
+            order_args = OrderArgs(
+                price=opp_exec, size=shares, side=BUY, token_id=opp_token,
+            )
+            signed = client.create_order(order_args)
+            result = client.post_order(signed, OrderType.FOK)
+            status = result.get("status", "")
+            if status == "MATCHED" or result.get("success"):
+                locked_profit = (1.00 - pair_cost) * shares
+                log.info("  LAST RESORT FILLED: %s %s @ $%.2f (pair_cost $%.2f, profit/loss $%.2f)",
+                         opp_dir, slug, opp_exec, pair_cost, locked_profit)
+                _mark_trade_hedged(slug, opp_token, opp_exec, shares, pair_cost)
+                record_order_filled()
+                save_trade({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "slug": slug, "direction": opp_dir.lower(),
+                    "token_id": opp_token, "entry_price": opp_best_ask,
+                    "shares": shares, "exec_price": opp_exec,
+                    "edge": 0, "confidence": 1.0,
+                    "reason": f"MM-pair last-resort (pair_cost=${pair_cost:.2f}, profit=${locked_profit:.2f})",
+                    "order_id": result.get("orderID", "unknown"),
+                    "dry_run": False, "mode": "mm-pair-last-resort",
+                })
+            else:
+                log.info("  LAST RESORT: %s FOK not filled", opp_dir)
+        except Exception as exc:
+            log.debug("  LAST RESORT failed: %s", exc)
+
+
 def _handle_ending(slug: str, slot_ts: int) -> None:
     """Ending phase: check for hedge opportunities + flash crashes."""
+    # Last-resort MM pair completion: 60s before market end, buy opposite at any price <= $1.05
+    # Even break-even ($1.00) is infinitely better than 50/50 directional (-$2.45 risk)
+    if MM_PAIR_ENABLED:
+        _last_resort_mm_complete(slug)
+
     # Late-game hedge
     if HEDGE_ENABLED:
         try:
