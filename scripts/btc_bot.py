@@ -154,6 +154,15 @@ MAKER_TIMEOUT_SEC = int(os.environ.get("MAKER_TIMEOUT_SEC", "120"))
 # Lower = higher profit per pair but fewer fills. Recommended: 0.98
 MM_PAIR_MAX_COST = float(os.environ.get("MM_PAIR_MAX_COST", "0.98"))
 
+# Hour-of-day filter for MM pair entries (UTC hours when new MM pairs are allowed)
+# Empty = all hours (24/7). Only controls new MM entries; completion of open pairs always runs.
+MM_TRADING_HOURS_STR = os.environ.get("MM_TRADING_HOURS_UTC", "")
+MM_TRADING_HOURS: set[int] | None = (
+    {int(h.strip()) for h in MM_TRADING_HOURS_STR.split(",") if h.strip()}
+    if MM_TRADING_HOURS_STR.strip()
+    else None
+)
+
 # Circuit breaker: halt ALL trading if an MM partial (unpaired) resolves as loss.
 # Indicates infrastructure problems. Bot stops until manual restart.
 MM_CIRCUIT_BREAKER = os.environ.get("MM_CIRCUIT_BREAKER", "true").lower() == "true"

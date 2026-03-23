@@ -137,6 +137,15 @@ BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
 MAX_VOL_5M = float(os.environ.get("MAX_VOL_5M", "0.12"))  # max 5-min vol % (0=disabled, 0.12=default)
 MM_PAIR_ENABLED = os.environ.get("MM_PAIR_ENABLED", "false").lower() == "true"
 MM_PAIR_MAX_COST = float(os.environ.get("MM_PAIR_MAX_COST", "0.98"))
+
+# Hour-of-day filter for MM pair entries (UTC hours when new MM pairs are allowed)
+# Empty = all hours (24/7). Only controls new MM entries; completion of open pairs always runs.
+MM_TRADING_HOURS_STR = os.environ.get("MM_TRADING_HOURS_UTC", "")
+MM_TRADING_HOURS: set[int] | None = (
+    {int(h.strip()) for h in MM_TRADING_HOURS_STR.split(",") if h.strip()}
+    if MM_TRADING_HOURS_STR.strip()
+    else None
+)
 MM_PAIR_REDEEM_SEC = int(os.environ.get("MM_PAIR_REDEEM_SEC", "120"))
 
 FLASH_CRASH_ENABLED = os.environ.get("FLASH_CRASH_ENABLED", "false").lower() == "true"
@@ -258,12 +267,15 @@ def handle_market_tick(event_type: str, data: dict) -> None:
         log.error("CIRCUIT BREAKER ACTIVE: all trading halted. Restart container to resume.")
         return
 
-    # Hour-of-day filter
+    # Hour-of-day filters
     current_hour = datetime.now(timezone.utc).hour
     in_trading_hours = TRADING_HOURS is None or current_hour in TRADING_HOURS
+    in_mm_hours = MM_TRADING_HOURS is None or current_hour in MM_TRADING_HOURS
 
     if not in_trading_hours and not MM_PAIR_ENABLED:
-        log.info("Hour %02d UTC not in trading hours, skipping.", current_hour)
+        log.info("TIME SKIPPED: directional at hour %02d UTC (allowed: %s)",
+                 current_hour,
+                 ",".join(str(h) for h in sorted(TRADING_HOURS)) if TRADING_HOURS else "ALL")
         return
 
     # Check pause (only blocks directional trading, MM pair is exempt)
@@ -274,8 +286,13 @@ def handle_market_tick(event_type: str, data: dict) -> None:
 
     if phase == "pre_market":
         if MM_PAIR_ENABLED:
-            # MM pair always runs first (24/7, no risk limits, no pause)
-            _handle_mm_only(slug, slot_ts)
+            if in_mm_hours:
+                # MM pair runs during allowed MM hours (no risk limits, no pause)
+                _handle_mm_only(slug, slot_ts)
+            else:
+                log.info("TIME SKIPPED: mm pre_market at hour %02d UTC (allowed: %s)",
+                         current_hour,
+                         ",".join(str(h) for h in sorted(MM_TRADING_HOURS)) if MM_TRADING_HOURS else "ALL")
         if not is_paused and in_trading_hours and slug not in traded_slugs:
             # Directional trading on top (only during trading hours, respects pause)
             _handle_pre_market(slug, slot_ts)
@@ -1025,6 +1042,10 @@ def main() -> None:
         log.info("Volatility filter: disabled")
     if MM_PAIR_ENABLED:
         log.info("MM Pair: ENABLED (bid both UP+DOWN, max_pair_cost=$%.2f, $0 maker fee)", MM_PAIR_MAX_COST)
+        if MM_TRADING_HOURS is not None:
+            log.info("MM trading hours (UTC): %s", ",".join(str(h) for h in sorted(MM_TRADING_HOURS)))
+        else:
+            log.info("MM trading hours: ALL (no filter)")
     else:
         log.info("MM Pair: disabled (directional trading only)")
     if MM_CIRCUIT_BREAKER:
