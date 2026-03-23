@@ -12,13 +12,13 @@ DASH_PID=$!
 sleep 1
 
 # Determine bot mode
-# v2 = event-driven architecture (EventBus + MarketClock + Polymarket WS)
+# v3 = clean arb MM (event-driven, no rescue/last-resort, strict pair_cost<$1.00)
 if [ "${BOT_MODE}" = "live" ]; then
-    echo "Starting bot v2 (event-driven) in LIVE mode..."
-    python /app/scripts/btc_bot_v2.py
+    echo "Starting bot v3 (clean arb MM) in LIVE mode..."
+    python /app/scripts/btc_bot_v3.py
 else
-    echo "Starting bot v2 (event-driven) in DRY-RUN mode..."
-    python /app/scripts/btc_bot_v2.py --dry-run
+    echo "Starting bot v3 (clean arb MM) in DRY-RUN mode..."
+    python /app/scripts/btc_bot_v3.py --dry-run
 fi
 
 # If bot exits, also stop dashboard
