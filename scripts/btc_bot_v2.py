@@ -553,30 +553,56 @@ def _complete_mm_pair(slug: str) -> None:
             _mark_trade_hedged(slug, opp_token, 0, 0, entry_price)
             continue
 
-        # Get opposite orderbook
-        try:
-            book_resp = httpx.get(
-                f"{CLOB_HOST}/book",
-                params={"token_id": opp_token},
-                timeout=10,
-            )
-            book_resp.raise_for_status()
-            book = book_resp.json()
-            asks = sorted(book.get("asks", []), key=lambda a: float(a["price"]))
-            if not asks:
+        # Retry orderbook check for up to 30s - prices change fast, wait for affordable ask
+        max_rescue_cost = 1.05  # accept up to 5% overplate as insurance
+        rescue_timeout = 30  # seconds to keep retrying
+        rescue_interval = 5  # seconds between retries
+        rescue_start = time.time()
+        opp_best_ask = None
+        book = None
+
+        while time.time() - rescue_start < rescue_timeout:
+            try:
+                book_resp = httpx.get(
+                    f"{CLOB_HOST}/book",
+                    params={"token_id": opp_token},
+                    timeout=10,
+                )
+                book_resp.raise_for_status()
+                book = book_resp.json()
+                asks = sorted(book.get("asks", []), key=lambda a: float(a["price"]))
+                if not asks:
+                    log.info("  PAIR RETRY: %s no asks available, retrying in %ds...", slug, rescue_interval)
+                    time.sleep(rescue_interval)
+                    continue
+                opp_best_ask = float(asks[0]["price"])
+            except Exception:
+                time.sleep(rescue_interval)
                 continue
-            opp_best_ask = float(asks[0]["price"])
-        except Exception:
+
+            pair_cost = entry_price + opp_best_ask
+            if pair_cost < max_rescue_cost:
+                # Affordable - proceed to buy
+                if pair_cost >= 1.00:
+                    log.info("  PAIR RESCUE: %s pair_cost $%.2f >= $1.00 (small loss $%.2f better than 50/50 directional)",
+                             slug, pair_cost, (pair_cost - 1.00) * trade.get("shares", 5))
+                break  # exit retry loop, proceed to FOK
+
+            elapsed = int(time.time() - rescue_start)
+            log.info("  PAIR RETRY: %s pair_cost $%.2f >= $%.2f, retrying... (%ds/%ds)",
+                     slug, pair_cost, max_rescue_cost, elapsed, rescue_timeout)
+            time.sleep(rescue_interval)
+        else:
+            # Exhausted retries
+            final_cost = entry_price + opp_best_ask if opp_best_ask else 0
+            log.info("  PAIR SKIP: %s pair_cost $%.2f still >= $%.2f after %ds retries",
+                     slug, final_cost, max_rescue_cost, rescue_timeout)
+            continue
+
+        if opp_best_ask is None or book is None:
             continue
 
         pair_cost = entry_price + opp_best_ask
-        max_rescue_cost = 1.05  # accept up to 5% overplate as insurance vs 50/50 directional loss
-        if pair_cost >= max_rescue_cost:
-            log.info("  PAIR SKIP: %s pair_cost $%.2f >= $%.2f (too expensive even as insurance)", slug, pair_cost, max_rescue_cost)
-            continue
-        if pair_cost >= 1.00:
-            log.info("  PAIR RESCUE: %s pair_cost $%.2f >= $1.00 (no arb, but small loss $%.2f better than 50/50 directional)",
-                     slug, pair_cost, (pair_cost - 1.00) * trade.get("shares", 5))
 
         # Buy opposite side via FOK
         opp_exec = round(min(opp_best_ask + 0.01, 0.95), 2)
