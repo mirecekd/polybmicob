@@ -250,7 +250,7 @@ def _update_risk_state() -> None:
     Called after resolution checks. This is more robust than in-memory tracking
     because it survives restarts and reads the actual trade outcomes.
     """
-    global daily_loss_usd, consecutive_losses, paused_until
+    global daily_loss_usd, consecutive_losses, paused_until, circuit_breaker_active
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     trades = load_trades()
