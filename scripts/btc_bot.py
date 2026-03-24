@@ -1040,7 +1040,7 @@ def place_mm_pair(
                 and _entry_analysis.pair_cost_at_bid is not None
             ):
                 _step = round(MM_PAIR_MAX_COST + 0.01, 2)
-                while _step <= 0.99 and _entry_analysis.pair_cost_at_bid <= _step:
+                while _step <= 0.99:
                     _relaxed = analyze_pair_entry(
                         up=_up_quote, down=_down_quote,
                         trade_size_usd=size_usd,
