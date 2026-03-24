@@ -1031,8 +1031,37 @@ def place_mm_pair(
             _entry_analysis.is_viable,
         )
         if not _entry_analysis.is_viable:
-            log.info("  PAIR ECON SKIP: %s", _entry_analysis.reason)
-            return None
+            # Fallback: if WEAK_MM only due to cost (risk is OK), retry with relaxed max
+            if (
+                _entry_analysis.classification == "WEAK_MM"
+                and _entry_analysis.partial_fill_risk < 0.7
+                and _entry_analysis.pair_cost_at_bid is not None
+                and _entry_analysis.pair_cost_at_bid <= 0.99
+            ):
+                _relaxed = analyze_pair_entry(
+                    up=_up_quote, down=_down_quote,
+                    trade_size_usd=size_usd,
+                    min_profit_per_share=PAIR_MIN_PROFIT_PER_SHARE,
+                    max_pair_cost=0.99,
+                    maker_rebate_rate=PAIR_MAKER_REBATE_RATE,
+                    completion_slippage=PAIR_COMPLETION_SLIPPAGE,
+                    depth_safety_ratio=PAIR_DEPTH_SAFETY_RATIO,
+                )
+                log.info(
+                    "  PAIR ECON RETRY @0.99: class=%s viable=%s profit=$%.4f risk=%.2f",
+                    _relaxed.classification, _relaxed.is_viable,
+                    _relaxed.fee_adjusted_locked_profit or 0,
+                    _relaxed.partial_fill_risk,
+                )
+                if _relaxed.is_viable:
+                    log.info("  PAIR ECON: accepted at relaxed max $0.99 (%s)", _relaxed.reason)
+                    _entry_analysis = _relaxed
+                else:
+                    log.info("  PAIR ECON SKIP: %s", _entry_analysis.reason)
+                    return None
+            else:
+                log.info("  PAIR ECON SKIP: %s", _entry_analysis.reason)
+                return None
 
     raw_pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
     pair_cost = raw_pair_cost
