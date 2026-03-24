@@ -992,82 +992,6 @@ def place_mm_pair(
         log.info("  MM: need both sides, only got %d, aborting", len(sides))
         return None
 
-    # ── Pair Economics Engine: fee-adjusted entry analysis ────
-    _entry_analysis = None
-    if PAIR_ECONOMICS_ENABLED:
-        # Build PairLegQuote from orderbook data already fetched
-        _up_side = [s for s in sides if s["label"] == "UP"][0]
-        _down_side = [s for s in sides if s["label"] == "DOWN"][0]
-        # Use maker_price (our actual bid price) not best_bid (raw orderbook)
-        # maker_price may differ from best_bid due to safety clamp (< best_ask)
-        _up_quote = PairLegQuote(
-            best_bid=_up_side["maker_price"],
-            best_ask=_up_side["best_ask"],
-            bid_depth_usd=_up_side["best_bid"] * _up_side["size"],
-            ask_depth_usd=_up_side["best_ask"] * _up_side["size"],
-        )
-        _down_quote = PairLegQuote(
-            best_bid=_down_side["maker_price"],
-            best_ask=_down_side["best_ask"],
-            bid_depth_usd=_down_side["best_bid"] * _down_side["size"],
-            ask_depth_usd=_down_side["best_ask"] * _down_side["size"],
-        )
-        _entry_analysis = analyze_pair_entry(
-            up=_up_quote,
-            down=_down_quote,
-            trade_size_usd=size_usd,
-            min_profit_per_share=PAIR_MIN_PROFIT_PER_SHARE,
-            max_pair_cost=MM_PAIR_MAX_COST,
-            maker_rebate_rate=PAIR_MAKER_REBATE_RATE,
-            completion_slippage=PAIR_COMPLETION_SLIPPAGE,
-            depth_safety_ratio=PAIR_DEPTH_SAFETY_RATIO,
-        )
-        log.info(
-            "  PAIR ECON: cost_bid=$%.3f cost_ask=%s locked=$%.4f fee_adj=$%.4f "
-            "risk=%.2f class=%s viable=%s",
-            _entry_analysis.pair_cost_at_bid or 0,
-            f"${_entry_analysis.pair_cost_at_ask:.3f}" if _entry_analysis.pair_cost_at_ask else "N/A",
-            _entry_analysis.gross_locked_profit or 0,
-            _entry_analysis.fee_adjusted_locked_profit or 0,
-            _entry_analysis.partial_fill_risk,
-            _entry_analysis.classification,
-            _entry_analysis.is_viable,
-        )
-        if not _entry_analysis.is_viable:
-            # Tiered retry: if WEAK_MM due to cost (risk OK), step up in $0.01 increments
-            # from MM_PAIR_MAX_COST toward hard ceiling $0.99
-            _accepted = False
-            if (
-                _entry_analysis.classification == "WEAK_MM"
-                and _entry_analysis.partial_fill_risk < 0.7
-                and _entry_analysis.pair_cost_at_bid is not None
-            ):
-                _step = round(MM_PAIR_MAX_COST + 0.01, 2)
-                while _step <= 0.99:
-                    _relaxed = analyze_pair_entry(
-                        up=_up_quote, down=_down_quote,
-                        trade_size_usd=size_usd,
-                        min_profit_per_share=PAIR_MIN_PROFIT_PER_SHARE,
-                        max_pair_cost=_step,
-                        maker_rebate_rate=PAIR_MAKER_REBATE_RATE,
-                        completion_slippage=PAIR_COMPLETION_SLIPPAGE,
-                        depth_safety_ratio=PAIR_DEPTH_SAFETY_RATIO,
-                    )
-                    log.info(
-                        "  PAIR ECON RETRY @%.2f: class=%s viable=%s profit=$%.4f",
-                        _step, _relaxed.classification, _relaxed.is_viable,
-                        _relaxed.fee_adjusted_locked_profit or 0,
-                    )
-                    if _relaxed.is_viable:
-                        log.info("  PAIR ECON: accepted at relaxed max $%.2f (%s)", _step, _relaxed.reason)
-                        _entry_analysis = _relaxed
-                        _accepted = True
-                        break
-                    _step = round(_step + 0.01, 2)
-            if not _accepted:
-                log.info("  PAIR ECON SKIP: %s", _entry_analysis.reason)
-                return None
-
     raw_pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
     pair_cost = raw_pair_cost
 
@@ -1109,6 +1033,43 @@ def place_mm_pair(
         sides[1]["label"], sides[1]["maker_price"],
         pair_cost, pair_profit, MM_PAIR_MAX_COST,
     )
+
+    # ── Pair Economics Engine: fee-adjusted entry analysis (after price adjustment) ──
+    if PAIR_ECONOMICS_ENABLED:
+        _up_side = [s for s in sides if s["label"] == "UP"][0]
+        _down_side = [s for s in sides if s["label"] == "DOWN"][0]
+        _up_quote = PairLegQuote(
+            best_bid=_up_side["maker_price"],
+            best_ask=_up_side["best_ask"],
+            bid_depth_usd=_up_side["best_bid"] * _up_side["size"],
+            ask_depth_usd=_up_side["best_ask"] * _up_side["size"],
+        )
+        _down_quote = PairLegQuote(
+            best_bid=_down_side["maker_price"],
+            best_ask=_down_side["best_ask"],
+            bid_depth_usd=_down_side["best_bid"] * _down_side["size"],
+            ask_depth_usd=_down_side["best_ask"] * _down_side["size"],
+        )
+        _entry_analysis = analyze_pair_entry(
+            up=_up_quote, down=_down_quote,
+            trade_size_usd=size_usd,
+            min_profit_per_share=PAIR_MIN_PROFIT_PER_SHARE,
+            max_pair_cost=pair_cost + 0.001,  # use actual adjusted pair_cost (tiny buffer for float)
+            maker_rebate_rate=PAIR_MAKER_REBATE_RATE,
+            completion_slippage=PAIR_COMPLETION_SLIPPAGE,
+            depth_safety_ratio=PAIR_DEPTH_SAFETY_RATIO,
+        )
+        log.info(
+            "  PAIR ECON: cost=$%.3f profit=$%.4f risk=%.2f class=%s viable=%s",
+            _entry_analysis.pair_cost_at_bid or 0,
+            _entry_analysis.fee_adjusted_locked_profit or 0,
+            _entry_analysis.partial_fill_risk,
+            _entry_analysis.classification,
+            _entry_analysis.is_viable,
+        )
+        if not _entry_analysis.is_viable:
+            log.info("  PAIR ECON SKIP: %s", _entry_analysis.reason)
+            return None
 
     if dry_run:
         # In dry-run, simulate the more likely fill (the cheaper side)
