@@ -169,6 +169,14 @@ HEDGE_MAX_PRICE = float(os.environ.get("HEDGE_MAX_PRICE", "0.35"))
 HEDGE_WINDOW_SEC = int(os.environ.get("HEDGE_WINDOW_SEC", "60"))
 HEDGE_ENABLED = os.environ.get("HEDGE_ENABLED", "true").lower() == "true"
 
+# Quick Flip: sell both sides of hedged MM pair during in-play for instant profit.
+# Instead of holding to resolution (wait 5-10min + claim), sell when winner+loser > pair_cost.
+# Advantages: no relayer needed, instant capital return, faster turnover.
+# Disadvantage: slightly less profit per trade (sell ~$0.95 vs resolve $1.00), taker fees on sells.
+QUICK_FLIP_ENABLED = os.environ.get("QUICK_FLIP_ENABLED", "false").lower() == "true"
+QUICK_FLIP_MIN_PROFIT = float(os.environ.get("QUICK_FLIP_MIN_PROFIT", "0.01"))  # min profit/share to trigger sell
+QUICK_FLIP_MIN_ELAPSED_SEC = int(os.environ.get("QUICK_FLIP_MIN_ELAPSED_SEC", "60"))  # wait at least Ns after market start
+
 BUILDER_KEY = os.environ.get("POLY_BUILDER_API_KEY", "")
 BUILDER_SECRET = os.environ.get("POLY_BUILDER_SECRET", "")
 BUILDER_PASSPHRASE = os.environ.get("POLY_BUILDER_PASSPHRASE", "")
@@ -233,11 +241,13 @@ from scripts.btc_bot import (
     place_maker_trade,
     place_mm_pair,
     place_sell_order,
+    sell_mm_pair_quick,
     restore_state_from_trades,
     _update_risk_state,
     _check_late_hedge,
     _place_insurance_bet,
     _mark_trade_early_exit,
+    _mark_trade_quick_flip,
     MM_CIRCUIT_BREAKER,
 )
 import scripts.btc_bot as _v1  # access shared state (circuit_breaker_active)
@@ -657,7 +667,7 @@ def _handle_mm_only(slug: str, slot_ts: int) -> None:
     # These limits are for directional trading only
 
     # Fresh balance check before every MM pair (RPC call, ~200ms)
-    min_needed = max(MAX_TRADE_USD * 2, 10.00)  # at least $10 to safely play both sides + buffer
+    min_needed = MAX_TRADE_USD * 2 + 1.00  # both sides + $1 buffer (e.g. $1 trade = $3 needed)
     wallet = get_fresh_balance()
     log.info("  MM: wallet $%.2f (fresh RPC check)", wallet)
     if wallet < min_needed:
@@ -986,6 +996,81 @@ def _scheduled_claim() -> None:
         log.debug("Wallet balance check failed: %s", exc)
 
 
+def _scheduled_quick_flip() -> None:
+    """
+    Quick Flip: scan hedged MM pairs and sell both sides if profitable.
+
+    Runs periodically (every 15s). For each hedged (both sides held) MM pair:
+      1. Check if market has been running long enough (QUICK_FLIP_MIN_ELAPSED_SEC)
+      2. Get best bids on both UP and DOWN tokens
+      3. If total_sell > pair_cost + min_profit: sell both via FOK
+      4. Mark trade as resolved with realized P&L
+
+    This frees capital instantly without waiting for resolution + claim.
+    """
+    if not QUICK_FLIP_ENABLED:
+        return
+
+    trades = load_trades()
+    now = int(time.time())
+
+    # Find hedged (both sides held) MM pair trades that are unresolved
+    hedged_pairs = [
+        t for t in trades
+        if t.get("hedged", False)
+        and t.get("resolved") is None
+        and not t.get("dry_run", True)
+        and t.get("mode", "").startswith("mm-pair")
+        and not t.get("quick_flip", False)
+    ]
+
+    if not hedged_pairs:
+        return
+
+    for trade in hedged_pairs:
+        if shutdown_requested:
+            break
+
+        slug = trade.get("slug", "")
+        if not slug:
+            continue
+
+        # Parse market start time from slug: btc-updown-5m-{epoch}
+        try:
+            market_start = int(slug.split("-")[-1])
+        except (ValueError, IndexError):
+            continue
+
+        elapsed = now - market_start
+
+        # Don't sell too early - wait for prices to settle
+        if elapsed < QUICK_FLIP_MIN_ELAPSED_SEC:
+            continue
+
+        # Don't try to sell after market ended (resolution handles that)
+        market_end = market_start + 300
+        if now > market_end:
+            continue
+
+        try:
+            client = get_clob_client()
+            result = sell_mm_pair_quick(
+                client, slug, trade,
+                min_profit_usd=QUICK_FLIP_MIN_PROFIT,
+                dry_run=dry_run,
+            )
+            if result and result.get("realized_pnl") is not None:
+                _mark_trade_quick_flip(slug, result["realized_pnl"], result)
+                log.info(
+                    "  QUICK FLIP DONE: %s PnL $%+.2f (freed capital, no claim needed)",
+                    slug, result["realized_pnl"],
+                )
+        except Exception as exc:
+            log.debug("Quick flip check failed for %s: %s", slug, exc)
+
+        time.sleep(RATE_LIMIT_SEC)
+
+
 def _scheduled_early_exit() -> None:
     """Check for early exit opportunities."""
     if not EARLY_EXIT_ENABLED:
@@ -1171,6 +1256,10 @@ def main() -> None:
     bus.schedule(interval_sec=claim_interval, handler=_scheduled_claim, name="claim_winnings")
     if EARLY_EXIT_ENABLED:
         bus.schedule(interval_sec=10, handler=_scheduled_early_exit, name="early_exit")
+    if QUICK_FLIP_ENABLED:
+        bus.schedule(interval_sec=15, handler=_scheduled_quick_flip, name="quick_flip")
+        log.info("Quick Flip: ENABLED (min_profit=$%.2f/share, min_elapsed=%ds, poll every 15s)",
+                 QUICK_FLIP_MIN_PROFIT, QUICK_FLIP_MIN_ELAPSED_SEC)
 
     # ── 7. Restore state from previous runs ───────────────────
     restore_state_from_trades()

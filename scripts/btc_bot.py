@@ -1460,6 +1460,218 @@ def _place_insurance_bet(
         log.debug("Insurance bet failed for %s: %s", slug, exc)
 
 
+def sell_mm_pair_quick(
+    client: ClobClient,
+    slug: str,
+    trade: dict,
+    min_profit_usd: float = 0.01,
+    dry_run: bool = False,
+) -> dict | None:
+    """
+    Quick Flip: sell both sides of an MM pair during in-play for instant profit.
+
+    Instead of holding to resolution (wait 5-10min + claim via relayer),
+    sell the winning side when its price is high enough that:
+      sell_winner + sell_loser > pair_cost + min_profit
+
+    Advantages over hold-to-resolution:
+      - No waiting for resolution (instant capital return)
+      - No relayer/claiming needed (no 429 quota issues)
+      - Faster capital turnover (can reinvest immediately)
+
+    Disadvantage:
+      - Slightly less profit per trade (sell at $0.95 vs resolve at $1.00)
+      - Taker fees on FOK sells (up to 1.56% per side)
+
+    Strategy:
+      1. Check best bids on both UP and DOWN tokens
+      2. Calculate: total_sell = best_bid_winner + best_bid_loser
+      3. If total_sell > pair_cost + min_profit: sell both via FOK
+      4. Mark trade as resolved with realized P&L
+
+    Args:
+        client: ClobClient instance.
+        slug: Market slug.
+        trade: Trade dict from btc_trades.json (must have token_id, direction, etc).
+        min_profit_usd: Minimum profit threshold to trigger sell (per share, default $0.01).
+        dry_run: If True, simulate without placing real orders.
+
+    Returns:
+        Dict with sell results, or None if sell conditions not met.
+    """
+    import json as _json
+
+    direction = trade.get("direction", "")
+    our_token_id = trade.get("token_id", "")
+    entry_price = trade.get("exec_price") or trade.get("entry_price", 0.50)
+    shares = trade.get("shares", 5)
+
+    # Get pair cost from trade record
+    # Parse from reason string (e.g. "pair_cost=$0.96") or hedge_pair_cost field
+    pair_cost = 0.0
+    reason_str = trade.get("reason", "")
+    if "pair_cost=$" in reason_str:
+        try:
+            pc_str = reason_str.split("pair_cost=$")[1].split(")")[0].split(",")[0].split(" ")[0]
+            pair_cost = float(pc_str)
+        except (ValueError, IndexError):
+            pass
+    if pair_cost <= 0:
+        pair_cost = trade.get("hedge_pair_cost", 0)
+    if pair_cost <= 0:
+        log.debug("  QUICK FLIP: %s no pair_cost found, skipping", slug)
+        return None
+
+    # Look up both token IDs from Gamma API
+    try:
+        resp = httpx.get(
+            "https://gamma-api.polymarket.com/events",
+            params={"slug": slug},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            return None
+        mkt = data[0].get("markets", [{}])[0]
+        token_ids_raw = mkt.get("clobTokenIds")
+        if isinstance(token_ids_raw, str):
+            token_ids = _json.loads(token_ids_raw)
+        else:
+            token_ids = token_ids_raw or []
+        if len(token_ids) < 2:
+            return None
+    except Exception:
+        return None
+
+    up_token = token_ids[0]
+    down_token = token_ids[1]
+
+    # Get best bids on BOTH sides
+    bids_by_token = {}
+    min_orders_by_token = {}
+    for label, token_id in [("UP", up_token), ("DOWN", down_token)]:
+        try:
+            book_resp = httpx.get(
+                f"{CLOB_HOST}/book",
+                params={"token_id": token_id},
+                timeout=10,
+            )
+            book_resp.raise_for_status()
+            book = book_resp.json()
+            bids = sorted(book.get("bids", []), key=lambda b: float(b["price"]), reverse=True)
+            min_orders_by_token[token_id] = int(book.get("min_order_size", MIN_ORDER_SIZE_FALLBACK))
+            if bids:
+                best_bid = float(bids[0]["price"])
+                available = sum(float(b["size"]) for b in bids if float(b["price"]) >= best_bid - 0.01)
+                bids_by_token[token_id] = {"best_bid": best_bid, "available": available}
+            else:
+                bids_by_token[token_id] = {"best_bid": 0.0, "available": 0}
+        except Exception:
+            bids_by_token[token_id] = {"best_bid": 0.0, "available": 0}
+
+    up_bid = bids_by_token[up_token]["best_bid"]
+    down_bid = bids_by_token[down_token]["best_bid"]
+    total_sell = up_bid + down_bid
+
+    # Check if selling is profitable (per share)
+    profit_per_share = total_sell - pair_cost
+    if profit_per_share < min_profit_usd:
+        log.debug(
+            "  QUICK FLIP: %s sell=$%.2f (UP=$%.2f + DOWN=$%.2f) vs pair=$%.2f -> profit=$%.3f < $%.3f min",
+            slug, total_sell, up_bid, down_bid, pair_cost, profit_per_share, min_profit_usd,
+        )
+        return None
+
+    total_profit = profit_per_share * shares
+    log.info(
+        "  QUICK FLIP: %s sell $%.2f (UP=$%.2f + DOWN=$%.2f) > pair $%.2f -> profit $%.2f (%d shares)",
+        slug, total_sell, up_bid, down_bid, pair_cost, total_profit, shares,
+    )
+
+    if dry_run:
+        log.info("  QUICK FLIP DRY-RUN: would sell both sides of %s for $%.2f profit", slug, total_profit)
+        return {"profit": total_profit, "dry_run": True}
+
+    # Sell both sides via FOK
+    sell_results = {}
+    for label, token_id in [("UP", up_token), ("DOWN", down_token)]:
+        bid_info = bids_by_token[token_id]
+        if bid_info["best_bid"] < 0.02:
+            log.info("  QUICK FLIP: %s %s bid too low ($%.2f), skipping this side", slug, label, bid_info["best_bid"])
+            continue
+        if bid_info["available"] < shares:
+            log.info("  QUICK FLIP: %s %s insufficient bid liq (%d available, need %d)",
+                     slug, label, int(bid_info["available"]), shares)
+            continue
+
+        sell_price = round(max(bid_info["best_bid"] - 0.01, 0.01), 2)
+        sell_size = max(shares, min_orders_by_token.get(token_id, 1))
+
+        try:
+            order_args = OrderArgs(
+                price=sell_price, size=sell_size, side=SELL, token_id=token_id,
+            )
+            signed = client.create_order(order_args)
+            result = client.post_order(signed, OrderType.FOK)
+            status = result.get("status", "")
+            if status == "MATCHED" or result.get("success"):
+                log.info("  QUICK FLIP SOLD %s: %s @ $%.2f (%d shares)",
+                         label, slug, sell_price, sell_size)
+                sell_results[label] = {
+                    "price": sell_price,
+                    "size": sell_size,
+                    "order_id": result.get("orderID", "unknown"),
+                }
+            else:
+                log.info("  QUICK FLIP: %s %s FOK not filled (status=%s)", slug, label, status)
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "balance" in err_msg or "allowance" in err_msg:
+                log.info("  QUICK FLIP: %s %s no position to sell (already resolved?)", slug, label)
+            else:
+                log.warning("  QUICK FLIP: %s %s sell failed: %s", slug, label, exc)
+
+    if not sell_results:
+        log.info("  QUICK FLIP: %s no sides sold", slug)
+        return None
+
+    # Calculate realized P&L
+    total_received = sum(r["price"] * r["size"] for r in sell_results.values())
+    total_cost = pair_cost * shares
+    realized_pnl = total_received - total_cost
+
+    log.info(
+        "  QUICK FLIP COMPLETE: %s sold %d side(s), received $%.2f, cost $%.2f, PnL $%+.2f",
+        slug, len(sell_results), total_received, total_cost, realized_pnl,
+    )
+
+    return {
+        "slug": slug,
+        "sell_results": sell_results,
+        "total_received": total_received,
+        "total_cost": total_cost,
+        "realized_pnl": realized_pnl,
+        "sides_sold": len(sell_results),
+    }
+
+
+def _mark_trade_quick_flip(slug: str, pnl: float, sell_details: dict) -> None:
+    """Mark a trade as quick-flipped (sold both sides during in-play)."""
+    trades = load_trades()
+    for t in trades:
+        if t.get("slug") == slug and t.get("resolved") is None and not t.get("early_exit"):
+            t["resolved"] = datetime.now(timezone.utc).isoformat()
+            t["won"] = pnl > 0
+            t["pnl"] = round(pnl, 4)
+            t["quick_flip"] = True
+            t["quick_flip_details"] = sell_details
+            break
+    tmp = TRADES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(trades, indent=2))
+    tmp.rename(TRADES_FILE)
+
+
 def _mark_trade_early_exit(slug: str, sell_price: float, pnl: float, trigger: str) -> None:
     """Mark a trade as early-exited in the trades file."""
     trades = load_trades()
