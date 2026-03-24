@@ -72,6 +72,7 @@ from lib.signal_engine import (
     kelly_fraction,
     calculate_poly_fee_rate,
 )
+from lib.pair_economics import analyze_pair_completion, analyze_pair_exit
 from lib.stats_collector import (
     record_cycle,
     record_momentum_skip,
@@ -588,11 +589,32 @@ def _complete_mm_pair(slug: str) -> None:
 
         pair_cost = entry_price + opp_best_ask
 
-        # v3 STRICT: only complete if pair_cost < $1.00 (guaranteed profit)
-        if pair_cost >= 1.00:
-            log.info("  PAIR SKIP: %s pair_cost $%.2f >= $1.00, leaving as directional",
-                     slug, pair_cost)
-            continue
+        # ── Pair Economics Engine: fee-adjusted completion analysis ──
+        from scripts.btc_bot import PAIR_ECONOMICS_ENABLED, PAIR_MIN_PROFIT_PER_SHARE, PAIR_COMPLETION_SLIPPAGE
+        if PAIR_ECONOMICS_ENABLED:
+            _completion = analyze_pair_completion(
+                filled_price=entry_price,
+                filled_direction=direction,
+                opposite_best_ask=opp_best_ask,
+                min_profit_per_share=PAIR_MIN_PROFIT_PER_SHARE,
+                max_pair_cost=1.00,
+                slippage_buffer=PAIR_COMPLETION_SLIPPAGE,
+            )
+            log.info(
+                "  PAIR ECON COMPLETE: pair_cost=$%.3f fee_adj=$%s complete=%s",
+                _completion.pair_cost,
+                f"{_completion.fee_adjusted_profit:.4f}" if _completion.fee_adjusted_profit is not None else "N/A",
+                _completion.should_complete,
+            )
+            if not _completion.should_complete:
+                log.info("  PAIR ECON SKIP: %s", _completion.reason)
+                continue
+        else:
+            # Fallback: v3 STRICT - only complete if pair_cost < $1.00
+            if pair_cost >= 1.00:
+                log.info("  PAIR SKIP: %s pair_cost $%.2f >= $1.00, leaving as directional",
+                         slug, pair_cost)
+                continue
 
         # Buy opposite side via FOK
         opp_exec = round(min(opp_best_ask + 0.01, 0.95), 2)
@@ -964,8 +986,19 @@ def _scheduled_claim() -> None:
     if not FUNDER:
         return
 
+    # Skip claim if no unresolved trades exist (nothing to claim, save API credits)
+    trades = load_trades()
+    unresolved = [
+        t for t in trades
+        if t.get("resolved") is None
+        and not t.get("dry_run", True)
+    ]
+    if not unresolved:
+        log.debug("--- Auto-claim skip: no unresolved trades ---")
+        return
+
     try:
-        log.info("--- Auto-claim check ---")
+        log.info("--- Auto-claim check (%d unresolved trades) ---", len(unresolved))
         claim_all_winnings(
             proxy_wallet=FUNDER, private_key=PRIVATE_KEY,
             builder_key=BUILDER_KEY, builder_secret=BUILDER_SECRET,

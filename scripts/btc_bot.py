@@ -55,6 +55,12 @@ from lib.signal_engine import (
     kelly_fraction,
     calculate_poly_fee_rate,
 )
+from lib.pair_economics import (
+    PairLegQuote,
+    analyze_pair_entry,
+    analyze_pair_completion,
+    analyze_pair_exit,
+)
 from lib.stats_collector import (
     record_cycle,
     record_momentum_skip,
@@ -162,6 +168,14 @@ MM_TRADING_HOURS: set[int] | None = (
     if MM_TRADING_HOURS_STR.strip()
     else None
 )
+
+# Pair Economics Engine: fee-adjusted economic model for MM pair decisions.
+# When enabled, replaces simple threshold checks with explicit profit calculations.
+PAIR_ECONOMICS_ENABLED = os.environ.get("PAIR_ECONOMICS_ENABLED", "true").lower() == "true"
+PAIR_MIN_PROFIT_PER_SHARE = float(os.environ.get("PAIR_MIN_PROFIT_PER_SHARE", "0.01"))
+PAIR_COMPLETION_SLIPPAGE = float(os.environ.get("PAIR_COMPLETION_SLIPPAGE_BUFFER", "0.01"))
+PAIR_DEPTH_SAFETY_RATIO = float(os.environ.get("PAIR_DEPTH_SAFETY_RATIO", "0.25"))
+PAIR_MAKER_REBATE_RATE = float(os.environ.get("PAIR_EXPECTED_MAKER_REBATE_RATE", "0.0"))
 
 # Circuit breaker: halt ALL trading if an MM partial (unpaired) resolves as loss.
 # Indicates infrastructure problems. Bot stops until manual restart.
@@ -977,6 +991,49 @@ def place_mm_pair(
         log.info("  MM: need both sides, only got %d, aborting", len(sides))
         return None
 
+    # ── Pair Economics Engine: fee-adjusted entry analysis ────
+    _entry_analysis = None
+    if PAIR_ECONOMICS_ENABLED:
+        # Build PairLegQuote from orderbook data already fetched
+        _up_side = [s for s in sides if s["label"] == "UP"][0]
+        _down_side = [s for s in sides if s["label"] == "DOWN"][0]
+        _up_quote = PairLegQuote(
+            best_bid=_up_side["best_bid"],
+            best_ask=_up_side["best_ask"],
+            bid_depth_usd=_up_side["best_bid"] * _up_side["size"],
+            ask_depth_usd=_up_side["best_ask"] * _up_side["size"],
+        )
+        _down_quote = PairLegQuote(
+            best_bid=_down_side["best_bid"],
+            best_ask=_down_side["best_ask"],
+            bid_depth_usd=_down_side["best_bid"] * _down_side["size"],
+            ask_depth_usd=_down_side["best_ask"] * _down_side["size"],
+        )
+        _entry_analysis = analyze_pair_entry(
+            up=_up_quote,
+            down=_down_quote,
+            trade_size_usd=size_usd,
+            min_profit_per_share=PAIR_MIN_PROFIT_PER_SHARE,
+            max_pair_cost=MM_PAIR_MAX_COST,
+            maker_rebate_rate=PAIR_MAKER_REBATE_RATE,
+            completion_slippage=PAIR_COMPLETION_SLIPPAGE,
+            depth_safety_ratio=PAIR_DEPTH_SAFETY_RATIO,
+        )
+        log.info(
+            "  PAIR ECON: cost_bid=$%.3f cost_ask=%s locked=$%.4f fee_adj=$%.4f "
+            "risk=%.2f class=%s viable=%s",
+            _entry_analysis.pair_cost_at_bid or 0,
+            f"${_entry_analysis.pair_cost_at_ask:.3f}" if _entry_analysis.pair_cost_at_ask else "N/A",
+            _entry_analysis.gross_locked_profit or 0,
+            _entry_analysis.fee_adjusted_locked_profit or 0,
+            _entry_analysis.partial_fill_risk,
+            _entry_analysis.classification,
+            _entry_analysis.is_viable,
+        )
+        if not _entry_analysis.is_viable:
+            log.info("  PAIR ECON SKIP: %s", _entry_analysis.reason)
+            return None
+
     raw_pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
     pair_cost = raw_pair_cost
 
@@ -1574,7 +1631,27 @@ def sell_mm_pair_quick(
     down_bid = bids_by_token[down_token]["best_bid"]
     total_sell = up_bid + down_bid
 
-    # Check if selling is profitable (per share)
+    # ── Pair Economics Engine: fee-adjusted exit analysis ────
+    if PAIR_ECONOMICS_ENABLED:
+        _exit = analyze_pair_exit(
+            up_best_bid=up_bid if up_bid > 0 else None,
+            down_best_bid=down_bid if down_bid > 0 else None,
+            pair_cost=pair_cost,
+            shares=shares,
+            min_profit_per_share=min_profit_usd,
+        )
+        log.info(
+            "  PAIR ECON EXIT: liq=$%s flip=$%s hold=$%.4f flip=%s",
+            f"{_exit.liquidation_value:.3f}" if _exit.liquidation_value else "N/A",
+            f"{_exit.fee_adjusted_flip_profit:.4f}" if _exit.fee_adjusted_flip_profit is not None else "N/A",
+            _exit.hold_profit,
+            _exit.should_quick_flip,
+        )
+        if not _exit.should_quick_flip:
+            log.debug("  PAIR ECON EXIT SKIP: %s", _exit.reason)
+            return None
+
+    # Check if selling is profitable (per share) - legacy fallback
     profit_per_share = total_sell - pair_cost
     if profit_per_share < min_profit_usd:
         log.debug(
