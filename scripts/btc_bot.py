@@ -1222,16 +1222,12 @@ def place_mm_pair(
             log.info("  MM: waiting for fill... %ds/%ds", elapsed, timeout_sec)
 
     # Timeout - check what filled
-    # Cancel unfilled orders, but return result if one side filled
+    # Leave unfilled orders on book (may still fill before market end)
     for side in sides:
         if side["label"] in filled_sides:
-            continue  # already filled, can't cancel
+            continue
         if side["label"] in order_ids:
-            try:
-                client.cancel(order_ids[side["label"]])
-                log.info("  MM: cancelled unfilled %s order", side["label"])
-            except Exception:
-                pass
+            log.info("  MM: %s order unfilled after timeout, leaving on book (may fill before market end)", side["label"])
 
     if filled_sides:
         # One side filled but not both - return it so _complete_mm_pair can finish
