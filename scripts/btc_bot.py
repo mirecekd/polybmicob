@@ -1062,11 +1062,17 @@ def place_mm_pair(
     raw_pair_cost = sides[0]["maker_price"] + sides[1]["maker_price"]
     pair_cost = raw_pair_cost
 
-    # If pair_cost > MM_PAIR_MAX_COST, reduce the more expensive side
-    # to bring pair_cost within the allowed threshold
-    if pair_cost > MM_PAIR_MAX_COST:
+    # Use PAIR ECON accepted tier as effective max (if tiered retry accepted higher)
+    _effective_max_cost = MM_PAIR_MAX_COST
+    if PAIR_ECONOMICS_ENABLED and _entry_analysis is not None and _entry_analysis.is_viable:
+        # _entry_analysis.pair_cost_at_bid is the cost that was accepted
+        if _entry_analysis.pair_cost_at_bid is not None:
+            _effective_max_cost = max(MM_PAIR_MAX_COST, _entry_analysis.pair_cost_at_bid)
+
+    # If pair_cost > effective max, reduce the more expensive side
+    if pair_cost > _effective_max_cost:
         for _ in range(20):  # max 20 iterations (covers wide spreads)
-            if pair_cost <= MM_PAIR_MAX_COST:
+            if pair_cost <= _effective_max_cost:
                 break
             # Reduce more expensive side by $0.01
             expensive = max(sides, key=lambda s: s["maker_price"])
@@ -1086,11 +1092,11 @@ def place_mm_pair(
         )
         return None
 
-    # Hard limit: skip pair if still above max cost after adjustment
-    if pair_cost > MM_PAIR_MAX_COST:
+    # Hard limit: skip pair if still above effective max after adjustment
+    if pair_cost > _effective_max_cost:
         log.info(
             "  MM: skip pair, adjusted pair_cost $%.2f > max $%.2f (raw=$%.2f)",
-            pair_cost, MM_PAIR_MAX_COST, raw_pair_cost,
+            pair_cost, _effective_max_cost, raw_pair_cost,
         )
         return None
 
