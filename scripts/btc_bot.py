@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 PolyBMiCoB - Polymarket BTC Micro-Cycle Options Bot
@@ -997,14 +998,16 @@ def place_mm_pair(
         # Build PairLegQuote from orderbook data already fetched
         _up_side = [s for s in sides if s["label"] == "UP"][0]
         _down_side = [s for s in sides if s["label"] == "DOWN"][0]
+        # Use maker_price (our actual bid price) not best_bid (raw orderbook)
+        # maker_price may differ from best_bid due to safety clamp (< best_ask)
         _up_quote = PairLegQuote(
-            best_bid=_up_side["best_bid"],
+            best_bid=_up_side["maker_price"],
             best_ask=_up_side["best_ask"],
             bid_depth_usd=_up_side["best_bid"] * _up_side["size"],
             ask_depth_usd=_up_side["best_ask"] * _up_side["size"],
         )
         _down_quote = PairLegQuote(
-            best_bid=_down_side["best_bid"],
+            best_bid=_down_side["maker_price"],
             best_ask=_down_side["best_ask"],
             bid_depth_usd=_down_side["best_bid"] * _down_side["size"],
             ask_depth_usd=_down_side["best_ask"] * _down_side["size"],
