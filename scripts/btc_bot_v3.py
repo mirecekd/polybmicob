@@ -144,6 +144,7 @@ BS_ENABLED = os.environ.get("BS_ENABLED", "false").lower() == "true"
 MAX_VOL_5M = float(os.environ.get("MAX_VOL_5M", "0.12"))  # max 5-min vol % (0=disabled, 0.12=default)
 MM_PAIR_ENABLED = os.environ.get("MM_PAIR_ENABLED", "false").lower() == "true"
 MM_PAIR_MAX_COST = float(os.environ.get("MM_PAIR_MAX_COST", "0.98"))
+MM_MAX_SPREAD = float(os.environ.get("MM_MAX_SPREAD", "0.10"))
 
 # Hour-of-day filter for MM pair entries (UTC hours when new MM pairs are allowed)
 # Empty = all hours (24/7). Only controls new MM entries; completion of open pairs always runs.
@@ -1203,7 +1204,7 @@ def main() -> None:
     else:
         log.info("Volatility filter: disabled")
     if MM_PAIR_ENABLED:
-        log.info("MM Pair: ENABLED (bid both UP+DOWN, max_pair_cost=$%.2f, $0 maker fee)", MM_PAIR_MAX_COST)
+        log.info("MM Pair: ENABLED (bid both UP+DOWN, max_pair_cost=$%.2f, max_spread=$%.2f, $0 maker fee)", MM_PAIR_MAX_COST, MM_MAX_SPREAD)
         if MM_TRADING_HOURS is not None:
             log.info("MM trading hours (UTC): %s", ",".join(str(h) for h in sorted(MM_TRADING_HOURS)))
         else:

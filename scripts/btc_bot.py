@@ -178,6 +178,12 @@ PAIR_COMPLETION_SLIPPAGE = float(os.environ.get("PAIR_COMPLETION_SLIPPAGE_BUFFER
 PAIR_DEPTH_SAFETY_RATIO = float(os.environ.get("PAIR_DEPTH_SAFETY_RATIO", "0.25"))
 PAIR_MAKER_REBATE_RATE = float(os.environ.get("PAIR_EXPECTED_MAKER_REBATE_RATE", "0.0"))
 
+# Maximum allowed spread (ask - bid) per side for MM pairs.
+# Wide spreads mean expensive completions and higher risk.
+# Skip pair entirely if either UP or DOWN spread exceeds this.
+# Default 0.10 = 10 cents max spread per token side.
+MM_MAX_SPREAD = float(os.environ.get("MM_MAX_SPREAD", "0.10"))
+
 # Circuit breaker: halt ALL trading if an MM partial (unpaired) resolves as loss.
 # Indicates infrastructure problems. Bot stops until manual restart.
 MM_CIRCUIT_BREAKER = os.environ.get("MM_CIRCUIT_BREAKER", "true").lower() == "true"
@@ -991,6 +997,20 @@ def place_mm_pair(
     if len(sides) < 2:
         log.info("  MM: need both sides, only got %d, aborting", len(sides))
         return None
+
+    # ── Spread filter: skip if bid-ask gap too wide on either side ──
+    # Wide spread = expensive completions if only one side fills (taker at ask)
+    # Example: bid=0.39 ask=0.57 = spread 0.18 -> completion costs 18c extra
+    if MM_MAX_SPREAD > 0:
+        for side in sides:
+            side_spread = side["best_ask"] - side["best_bid"]
+            if side_spread > MM_MAX_SPREAD:
+                log.info(
+                    "  MM SPREAD SKIP: %s spread $%.2f (bid=$%.2f ask=$%.2f) > $%.2f max",
+                    side["label"], side_spread,
+                    side["best_bid"], side["best_ask"], MM_MAX_SPREAD,
+                )
+                return None
 
     # ── Pair Economics Engine: fee-adjusted entry gate (BEFORE bidding) ──
     if PAIR_ECONOMICS_ENABLED:
