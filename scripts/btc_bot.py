@@ -1018,7 +1018,8 @@ def place_mm_pair(
             depth_safety_ratio=PAIR_DEPTH_SAFETY_RATIO,
         )
         log.info(
-            "  PAIR ECON: cost=$%.3f profit=$%.4f risk=%.2f class=%s viable=%s",
+            "  PAIR ECON @%.2f: cost=$%.3f profit=$%.4f risk=%.2f class=%s viable=%s",
+            MM_PAIR_MAX_COST,
             _entry_analysis.pair_cost_at_bid or 0,
             _entry_analysis.fee_adjusted_locked_profit or 0,
             _entry_analysis.partial_fill_risk,
